@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(rtk git *)",
+      "Bash(uv run *)",
+      "Bash(rtk tree *)"
+    ]
+  }
+}
