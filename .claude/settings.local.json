@@ -9,7 +9,8 @@
       "Bash(cp /tmp/pywire_check/check.py .)",
       "Bash(rtk ls *)",
       "Bash(rtk read *)",
-      "Bash(git remote *)"
+      "Bash(git remote *)",
+      "Bash(./scripts/bump-version.sh minor *)"
     ]
   }
 }
