@@ -2,11 +2,11 @@ from __future__ import annotations
 
 import inspect
 import sys
-from typing import Annotated, Any, ForwardRef, get_args, get_origin
+from typing import Any, get_args, get_origin
 
 from .definitions import BeanDefinition
 from .exceptions import DependencyResolutionError
-from .markers import _AUTOWIRED
+from .markers import Autowired
 
 type Registry = dict[type, BeanDefinition]
 
@@ -65,19 +65,18 @@ class Container:
         module_globals = vars(sys.modules[cls.__module__])
 
         def resolve_field_type(annotation: Any) -> Any:
-            if get_origin(annotation) is not Annotated:
+            if get_origin(annotation) is not Autowired:
                 return None
 
-            wrapped, *metadata = get_args(annotation)
-
-            if _AUTOWIRED not in metadata:
-                return None
+            (wrapped,) = get_args(annotation)
 
             # Forward references inside Autowired["X"] are left unresolved by
             # eval_str=True, since it only evaluates the outer annotation string.
-            if isinstance(wrapped, ForwardRef):
+            # Under the PEP 695 alias, such a reference surfaces as a plain str
+            # rather than a ForwardRef.
+            if isinstance(wrapped, str):
                 try:
-                    return eval(wrapped.__forward_arg__, module_globals)
+                    return eval(wrapped, module_globals)
                 except NameError:
                     return None
 

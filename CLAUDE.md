@@ -57,19 +57,22 @@ and behavior:
 This is the core trick of the library and the most important thing to understand before
 touching `container.py`:
 
-- `Autowired[T]` (`markers.py`) is `Annotated[T, _AUTOWIRED]`, where `_AUTOWIRED` is a
-  private sentinel. Building it on `Annotated` (rather than a custom marker class) means
-  static type checkers see the field as plain `T`, while the container still recovers the
-  `_AUTOWIRED` tag at runtime via `typing.get_origin`/`get_args`.
+- `Autowired[T]` (`markers.py`) is a PEP 695 type alias, `type Autowired[T] =
+  Annotated[T, _AUTOWIRED]`, where `_AUTOWIRED` is a private sentinel. Static type checkers
+  see the field as plain `T`. At runtime, subscripting the alias (`Autowired[Foo]`) does
+  **not** collapse to `Annotated[Foo, _AUTOWIRED]` — `typing.get_origin` on it returns the
+  `Autowired` alias itself, not `Annotated`. The container checks `get_origin(annotation) is
+  Autowired` and pulls `T` out via `get_args` (single-element tuple, no metadata to filter —
+  the origin check alone proves it's an Autowired field).
 - `_instrument()` monkey-patches `__new__` and `__init__` on every registered class:
   - The patched `__new__` writes the freshly created (but not yet `__init__`-ed) instance
     into `BeanDefinition.instance` **before** running `__init__`. This early registration is
     what makes circular dependencies resolvable — see below.
   - The patched `__init__` walks `inspect.get_annotations(cls, eval_str=True)`, resolves each
-    `Autowired[...]` field (via `get_origin`/`get_args`; a leftover `ForwardRef` from a string
-    forward reference is evaluated against the owning module's globals) to a concrete type,
-    and injects the resolved dependency via `self.resolve(field_type)` before calling the
-    original `__init__`.
+    `Autowired[...]` field (via `get_origin`/`get_args`; a string forward reference inside
+    `Autowired["X"]` surfaces as a plain `str`, not a `ForwardRef`, under the PEP 695 alias,
+    and is evaluated against the owning module's globals) to a concrete type, and injects the
+    resolved dependency via `self.resolve(field_type)` before calling the original `__init__`.
 - Circular dependencies (A depends on B, B depends on A) are handled via two instance flags
   set on each object: `_di_initializing` and `_di_initialized`. If `__init__` is re-entered
   on an instance that is already mid-construction (found via the early registry write in
@@ -101,7 +104,7 @@ touching `container.py`:
 | `container.py` | `Container`: registry, resolve/register, `__new__`/`__init__` instrumentation |
 | `definitions.py` | `BeanDefinition` (registration metadata) and `Scope` enum (only `SINGLETON` is implemented; `PROTOTYPE` is declared but unused) |
 | `decorators.py` | `@component` and aliases, global container accessor |
-| `markers.py` | `Autowired[T]` (`Annotated[T, _AUTOWIRED]`) |
+| `markers.py` | `Autowired[T]` (PEP 695 alias of `Annotated[T, _AUTOWIRED]`) |
 | `exceptions.py` | `DependencyResolutionError` |
 
 ## Conventions to preserve

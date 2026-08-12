@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-from typing import Annotated, TypeVar
-
-T = TypeVar("T")
+from typing import Annotated
 
 
 class _AutowiredMeta:
@@ -16,11 +14,12 @@ class _AutowiredMeta:
 
 _AUTOWIRED = _AutowiredMeta()
 
-# Built on Annotated so static type checkers see the wrapped type T directly
-# instead of an opaque marker, while the container still recovers the
-# _AUTOWIRED tag at runtime via typing.get_origin/get_args.
+# PEP 695 type alias: static type checkers see the wrapped type T directly
+# instead of an opaque marker, while the container recovers the _AUTOWIRED
+# tag at runtime via typing.get_origin (origin is this alias itself, not
+# Annotated) followed by typing.get_args to extract T.
 #
 # Example:
 #     class Repository:
 #         client: Autowired[DBClient]
-Autowired = Annotated[T, _AUTOWIRED]
+type Autowired[T] = Annotated[T, _AUTOWIRED]
