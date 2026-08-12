@@ -10,7 +10,7 @@ class Scope(StrEnum):
 
 @dataclass(slots=True)
 class BeanDefinition:
-    """Metadata e stato runtime di un componente registrato."""
+    """Metadata and runtime state of a registered component."""
 
     cls: type
     instance: Any | None = None

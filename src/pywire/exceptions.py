@@ -1,2 +1,2 @@
 class DependencyResolutionError(Exception):
-    """Sollevata quando una dipendenza non può essere risolta."""
+    """Raised when a dependency cannot be resolved."""
