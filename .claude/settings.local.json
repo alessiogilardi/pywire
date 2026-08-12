@@ -16,7 +16,8 @@
       "Bash(uv python *)",
       "Bash(rtk uv *)",
       "Bash(rtk find *)",
-      "Bash(rtk grep *)"
+      "Bash(rtk grep *)",
+      "Bash(./scripts/bump-version.sh patch *)"
     ]
   }
 }
