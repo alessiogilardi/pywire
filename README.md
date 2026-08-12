@@ -1,6 +1,6 @@
 # PyWire — Dependency Injection Container
 
-A minimal Dependency Injection container for Python 3.13, inspired by Spring's `@Component` and `@Autowired`.
+A minimal Dependency Injection container for Python 3.12+, inspired by Spring's `@Component` and `@Autowired`.
 
 ## Overview
 
