@@ -3,7 +3,11 @@
     "allow": [
       "Bash(rtk git *)",
       "Bash(uv run *)",
-      "Bash(rtk tree *)"
+      "Bash(rtk tree *)",
+      "Bash(mkdir -p /tmp/pywire_check)",
+      "Bash(cat)",
+      "Bash(cp /tmp/pywire_check/check.py .)",
+      "Bash(rtk ls *)"
     ]
   }
 }
