@@ -7,7 +7,9 @@
       "Bash(mkdir -p /tmp/pywire_check)",
       "Bash(cat)",
       "Bash(cp /tmp/pywire_check/check.py .)",
-      "Bash(rtk ls *)"
+      "Bash(rtk ls *)",
+      "Bash(rtk read *)",
+      "Bash(git remote *)"
     ]
   }
 }
