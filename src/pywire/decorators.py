@@ -5,31 +5,25 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from .container import Container
 
-_global_container: Container | None = None
+_default_container: Container | None = None
 
 
-def component[T](cls: type[T], container: Container | None = None) -> type[T]:
-    """Decoratore per registrare una classe come componente.
-
-    Se nessun container esplicito è disponibile, usa il global container.
-    """
-    if not container:
-        container = get_global_container()
-
-    container.register(cls)
+def component[T](cls: type[T]) -> type[T]:
+    """Decorator to register a class on the default container."""
+    get_default_container().register(cls)
     return cls
 
 
-def get_global_container() -> Container:
-    """Restituisce il container globale."""
+def get_default_container() -> Container:
+    """Return the default container."""
     from .container import Container
 
-    global _global_container
+    global _default_container
 
-    if _global_container is None:
-        _global_container = Container()
+    if _default_container is None:
+        _default_container = Container()
 
-    return _global_container
+    return _default_container
 
 
 service = component

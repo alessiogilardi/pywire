@@ -3,7 +3,7 @@ from .decorators import (
     agent,
     client,
     component,
-    get_global_container,
+    get_default_container,
     repository,
     service,
 )
@@ -19,7 +19,7 @@ __all__ = [
     "agent",
     "client",
     "component",
-    "get_global_container",
+    "get_default_container",
     "repository",
     "service",
 ]

@@ -2,35 +2,34 @@ from __future__ import annotations
 
 import inspect
 import sys
-from typing import Any, TypeVar
+from typing import Annotated, Any, ForwardRef, get_args, get_origin
 
 from .definitions import BeanDefinition
 from .exceptions import DependencyResolutionError
-from .markers import _AutowiredMarker
+from .markers import _AUTOWIRED
 
-T = TypeVar("T")
 type Registry = dict[type, BeanDefinition]
 
 class Container:
     """Dependency Injection container.
 
-    Ogni Container possiede il proprio registry e quindi il proprio scope
-    singleton. Due Container distinti possono contenere istanze diverse
-    dello stesso componente.
+    Each Container owns its own registry and therefore its own singleton
+    scope. Two distinct Containers can hold different instances of the
+    same component.
     """
 
     def __init__(self) -> None:
         self._registry: Registry = dict()
 
-    def register(self, cls: type[T]) -> type[T]:
-        """Registra una classe come componente.
+    def register[T](self, cls: type[T]) -> type[T]:
+        """Register a class as a component.
 
-        La classe viene registrata senza essere istanziata. La creazione
-        dell'istanza avviene lazy al primo resolve().
+        The class is registered without being instantiated. The instance
+        is created lazily on the first resolve().
         """
         if cls in self._registry:
             raise ValueError(
-                f"Component '{cls.__name__}' è già registrato."
+                f"Component '{cls.__name__}' is already registered."
             )
 
         self._registry[cls] = BeanDefinition(cls=cls)
@@ -38,14 +37,14 @@ class Container:
 
         return cls
 
-    def resolve(self, target_type: type[T]) -> T:
-        """Restituisce il singleton associato a target_type."""
+    def resolve[T](self, target_type: type[T]) -> T:
+        """Return the singleton associated with target_type."""
         definition = self._registry.get(target_type)
 
         if definition is None:
             name = getattr(target_type, "__name__", target_type)
             raise DependencyResolutionError(
-                f"Impossibile risolvere '{name}': non è registrato nel container."
+                f"Cannot resolve '{name}': it is not registered in the container."
             )
 
         if definition.instance is None:
@@ -53,45 +52,36 @@ class Container:
 
         return definition.instance
 
-    def get(self, target_type: type[T]) -> T:
-        """Alias leggibile per resolve()."""
+    def get[T](self, target_type: type[T]) -> T:
+        """Readable alias for resolve()."""
         return self.resolve(target_type)
 
     def _instrument(self, cls: type) -> None:
-        """Installa __new__ e __init__ necessari al field injection."""
+        """Install the __new__ and __init__ needed for field injection."""
 
-        raw_annotations = dict(inspect.get_annotations(cls))
+        raw_annotations = inspect.get_annotations(cls, eval_str=True)
         original_init = cls.__init__
         original_new: Any = cls.__new__
         module_globals = vars(sys.modules[cls.__module__])
 
         def resolve_field_type(annotation: Any) -> Any:
-            if isinstance(annotation, _AutowiredMarker):
-                wrapped = annotation.wrapped_type
-                # If wrapped_type is a string (forward reference), try to resolve it
-                if isinstance(wrapped, str):
-                    try:
-                        return eval(wrapped, module_globals)
-                    except NameError:
-                        return None
-                return wrapped
+            if get_origin(annotation) is not Annotated:
+                return None
 
-            if isinstance(annotation, str):
+            wrapped, *metadata = get_args(annotation)
+
+            if _AUTOWIRED not in metadata:
+                return None
+
+            # Forward references inside Autowired["X"] are left unresolved by
+            # eval_str=True, since it only evaluates the outer annotation string.
+            if isinstance(wrapped, ForwardRef):
                 try:
-                    evaluated = eval(annotation, module_globals)
+                    return eval(wrapped.__forward_arg__, module_globals)
                 except NameError:
                     return None
 
-                if isinstance(evaluated, _AutowiredMarker):
-                    wrapped = evaluated.wrapped_type
-                    if isinstance(wrapped, str):
-                        try:
-                            return eval(wrapped, module_globals)
-                        except NameError:
-                            return None
-                    return wrapped
-
-            return None
+            return wrapped
 
         def new(
             target_cls: type,
@@ -108,8 +98,8 @@ class Container:
             else:
                 instance = original_new(target_cls, *args, **kwargs)
 
-            # Registrazione anticipata: permette di chiudere dipendenze
-            # circolari durante la fase di injection.
+            # Early registration: allows closing circular dependencies
+            # during the injection phase.
             definition.instance = instance
 
             return instance
@@ -123,8 +113,9 @@ class Container:
                 return
 
             if getattr(instance, "_di_initializing", False):
-                # L'istanza è già in costruzione. Un'altra dipendenza
-                # circolare ha ottenuto la stessa istanza dal registry.
+                # The instance is already under construction. Another
+                # circular dependency obtained the same instance from
+                # the registry.
                 return
 
             instance._di_initializing = True

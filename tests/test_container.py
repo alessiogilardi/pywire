@@ -1,5 +1,5 @@
 
-from pywire import Autowired, Container, component, get_global_container
+from pywire import Autowired, Container, component, get_default_container
 
 
 def test_container_initialization():
@@ -97,13 +97,13 @@ def test_bean_definition_metadata():
     assert definition.instance is instance
 
 
-def test_global_container_functionality():
-    """Test the global container functionality."""
-    global_container = get_global_container()
+def test_default_container_functionality():
+    """Test the default container functionality."""
+    default_container = get_default_container()
 
-    assert global_container is not None
-    assert isinstance(global_container, Container)
+    assert default_container is not None
+    assert isinstance(default_container, Container)
 
     # Get it again to verify singleton behavior
-    same_container = get_global_container()
-    assert same_container is global_container
+    same_container = get_default_container()
+    assert same_container is default_container

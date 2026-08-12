@@ -1,28 +1,26 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Annotated, TypeVar
+
+T = TypeVar("T")
 
 
-class _AutowiredMarker:
-    """Marker interno usato per rappresentare Autowired[T]."""
+class _AutowiredMeta:
+    """Sentinel tag carried as Annotated metadata to mark injected fields."""
 
-    __slots__ = ("wrapped_type",)
-
-    def __init__(self, wrapped_type: Any) -> None:
-        self.wrapped_type = wrapped_type
+    __slots__ = ()
 
     def __repr__(self) -> str:
-        name = getattr(self.wrapped_type, "__name__", self.wrapped_type)
-        return f"Autowired[{name}]"
+        return "Autowired"
 
 
-class Autowired:
-    """Marker per dichiarare una dependency injection.
+_AUTOWIRED = _AutowiredMeta()
 
-    Example:
-        class Repository:
-            client: Autowired[DBClient]
-    """
-
-    def __class_getitem__(cls, item: Any) -> _AutowiredMarker:
-        return _AutowiredMarker(item)
+# Built on Annotated so static type checkers see the wrapped type T directly
+# instead of an opaque marker, while the container still recovers the
+# _AUTOWIRED tag at runtime via typing.get_origin/get_args.
+#
+# Example:
+#     class Repository:
+#         client: Autowired[DBClient]
+Autowired = Annotated[T, _AUTOWIRED]

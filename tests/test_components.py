@@ -120,7 +120,7 @@ def test_duplicate_registration_raises_error():
 
     container.register(DuplicateService)
 
-    with pytest.raises(ValueError, match="è già registrato"):
+    with pytest.raises(ValueError, match="is already registered"):
         container.register(DuplicateService)
 
 
