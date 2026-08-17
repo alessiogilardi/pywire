@@ -2,11 +2,11 @@ from __future__ import annotations
 
 import inspect
 import sys
-from typing import Any, get_args, get_origin
+from typing import Any, get_type_hints
 
 from .definitions import BeanDefinition
 from .exceptions import DependencyResolutionError
-from .markers import Autowired
+from .markers import resolve_autowired_type
 
 type Registry = dict[type, BeanDefinition]
 
@@ -64,23 +64,21 @@ class Container:
         original_new: Any = cls.__new__
         module_globals = vars(sys.modules[cls.__module__])
 
-        def resolve_field_type(annotation: Any) -> Any:
-            if get_origin(annotation) is not Autowired:
-                return None
-
-            (wrapped,) = get_args(annotation)
-
-            # Forward references inside Autowired["X"] are left unresolved by
-            # eval_str=True, since it only evaluates the outer annotation string.
-            # Under the PEP 695 alias, such a reference surfaces as a plain str
-            # rather than a ForwardRef.
-            if isinstance(wrapped, str):
-                try:
-                    return eval(wrapped, module_globals)
-                except NameError:
-                    return None
-
-            return wrapped
+        # Deliberately not passing globalns=module_globals here: original_init
+        # may be inherited from a base class defined in a different module
+        # than cls, in which case cls.__module__ would be the wrong module.
+        # get_type_hints() with no explicit globalns already resolves
+        # correctly on its own, since it reads original_init.__globals__
+        # internally, which is always the module __init__ was defined in.
+        init_hints = get_type_hints(original_init, include_extras=True)
+        # Skip "self" (the first parameter of an instance __init__).
+        ctor_param_names = list(inspect.signature(original_init).parameters)[1:]
+        ctor_autowired_params = {
+            name: target
+            for name in ctor_param_names
+            if (target := resolve_autowired_type(init_hints.get(name), module_globals))
+            is not None
+        }
 
         def new(
             target_cls: type,
@@ -120,7 +118,7 @@ class Container:
             instance._di_initializing = True
 
             for field_name, annotation in raw_annotations.items():
-                field_type = resolve_field_type(annotation)
+                field_type = resolve_autowired_type(annotation, module_globals)
 
                 if field_type is not None:
                     setattr(
@@ -129,7 +127,21 @@ class Container:
                         self.resolve(field_type),
                     )
 
-            original_init(instance, *args, **kwargs)
+            # Explicitly passed keyword arguments win over auto-resolution.
+            # Note: in an A<->B cycle resolved via constructor injection, the
+            # partner obtained through self.resolve(...) here is the
+            # not-yet-initialized instance (its __init__ has not run yet,
+            # since resolving its own constructor args is still in
+            # progress) -- analogous to, but not identical to, the
+            # field-injection case where some fields may already be set via
+            # setattr before the circular call.
+            resolved_kwargs = {
+                name: self.resolve(target)
+                for name, target in ctor_autowired_params.items()
+                if name not in kwargs
+            }
+
+            original_init(instance, *args, **resolved_kwargs, **kwargs)
 
             instance._di_initialized = True
             instance._di_initializing = False

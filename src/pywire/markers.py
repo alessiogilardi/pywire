@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Annotated
+from typing import Annotated, Any, get_args, get_origin
 
 
 class _AutowiredMeta:
@@ -23,3 +23,29 @@ _AUTOWIRED = _AutowiredMeta()
 #     class Repository:
 #         client: Autowired[DBClient]
 type Autowired[T] = Annotated[T, _AUTOWIRED]
+
+
+def resolve_autowired_type(
+    annotation: Any, module_globals: dict[str, Any]
+) -> Any | None:
+    """Return the wrapped type if annotation is Autowired[T], else None.
+
+    If Autowired[T] is unresolved (T is a forward-reference string that
+    cannot be evaluated against module_globals), returns None.
+    """
+    if get_origin(annotation) is not Autowired:
+        return None
+
+    (wrapped,) = get_args(annotation)
+
+    # Forward references inside Autowired["X"] are left unresolved by
+    # eval_str=True, since it only evaluates the outer annotation string.
+    # Under the PEP 695 alias, such a reference surfaces as a plain str
+    # rather than a ForwardRef.
+    if isinstance(wrapped, str):
+        try:
+            return eval(wrapped, module_globals)
+        except NameError:
+            return None
+
+    return wrapped
