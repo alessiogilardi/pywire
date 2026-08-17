@@ -1,4 +1,6 @@
 
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
 from pywire import Autowired, Container
 
 
@@ -52,6 +54,28 @@ class NotInjected:
 class PlainDefaultConsumer:
     def __init__(self, value: NotInjected | None = None) -> None:
         self.value = value
+
+
+class AppSettingsWithEnv(BaseSettings):
+    model_config = SettingsConfigDict(env_file=None)
+
+    db_url: str = "sqlite://memory"
+
+
+class AppSettingsDefault(BaseSettings):
+    model_config = SettingsConfigDict(env_file=None)
+
+    db_url: str = "sqlite://memory"
+
+
+class SettingsConsumerWithEnv:
+    def __init__(self, settings: Autowired[AppSettingsWithEnv]) -> None:
+        self.settings = settings
+
+
+class SettingsConsumerDefault:
+    def __init__(self, settings: Autowired[AppSettingsDefault]) -> None:
+        self.settings = settings
 
 
 def test_constructor_parameter_is_resolved():
@@ -123,3 +147,34 @@ def test_non_autowired_default_parameter_is_left_untouched():
     consumer = container.resolve(PlainDefaultConsumer)
 
     assert consumer.value is None
+
+
+def test_pydantic_settings_with_env_var_override(monkeypatch):
+    """A pydantic BaseSettings subclass reads from environment variables
+    before defaults. When an env var is set before the settings component
+    is first resolved in a container, the injected settings reflect the
+    env var value."""
+    monkeypatch.setenv("DB_URL", "postgres://test")
+
+    container = Container()
+
+    container.register(AppSettingsWithEnv)
+    container.register(SettingsConsumerWithEnv)
+
+    consumer = container.resolve(SettingsConsumerWithEnv)
+
+    assert consumer.settings.db_url == "postgres://test"
+
+
+def test_pydantic_settings_with_default_value():
+    """A pydantic BaseSettings subclass with a default field value is
+    resolvable as a component, and can be injected into another component
+    via constructor Autowired injection."""
+    container = Container()
+
+    container.register(AppSettingsDefault)
+    container.register(SettingsConsumerDefault)
+
+    consumer = container.resolve(SettingsConsumerDefault)
+
+    assert consumer.settings.db_url == "sqlite://memory"
