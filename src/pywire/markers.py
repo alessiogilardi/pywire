@@ -29,7 +29,7 @@ type Autowired[T] = Annotated[T, _AUTOWIRED]
 def resolve_autowired_type(
     annotation: object,
     module_globals: dict[str, object],
-) -> Any | None:  # noqa: ANN401  # pyright: ignore[reportExplicitAny]
+) -> Any | None:  # noqa: ANN401
     """Return the wrapped type if annotation is Autowired[T], else None.
 
     If Autowired[T] is unresolved (T is a forward-reference string that

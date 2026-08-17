@@ -60,9 +60,7 @@ def _wire_endpoint(func: Callable[..., object]) -> None:
         # __signature__, even though CPython allows the assignment. Any is
         # the only way to bypass that static restriction for a real dynamic
         # attribute write -- object would still reject the unknown attribute.
-        cast(Any, func).__signature__ = (  # pyright: ignore[reportExplicitAny]
-            sig.replace(parameters=new_params)
-        )
+        cast(Any, func).__signature__ = sig.replace(parameters=new_params)
 
 
 def _install_patch() -> None:
@@ -87,7 +85,7 @@ def _install_patch() -> None:
         # Forwards to FastAPI's own add_api_route, whose kwargs (response_model,
         # status_code, tags, ...) we deliberately don't duplicate/pin here --
         # Any is the correct type for an untyped passthrough wrapper.
-        **kwargs: Any,  # noqa: ANN401  # pyright: ignore[reportExplicitAny]
+        **kwargs: Any,  # noqa: ANN401
     ) -> None:
         _wire_endpoint(endpoint)
         original(self, path, endpoint, **kwargs)

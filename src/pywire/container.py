@@ -61,7 +61,7 @@ class Container:
 
         raw_annotations = inspect.get_annotations(cls, eval_str=True)
         original_init = cls.__init__
-        original_new: Any = cls.__new__  # pyright: ignore[reportExplicitAny]
+        original_new: Any = cls.__new__
         module_globals = vars(sys.modules[cls.__module__])
 
         # Deliberately not passing globalns=module_globals here: original_init
@@ -113,7 +113,7 @@ class Container:
             target_cls: type,
             *args: object,
             **kwargs: object,
-        ) -> Any:  # noqa: ANN401  # pyright: ignore[reportExplicitAny]
+        ) -> Any:  # noqa: ANN401
             definition = self._registry[target_cls]
 
             if definition.instance is not None:
