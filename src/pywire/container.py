@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import inspect
 import sys
-from typing import Any, get_type_hints
+from typing import Any, cast, get_type_hints
 
 from .definitions import BeanDefinition
 from .exceptions import DependencyResolutionError
@@ -50,7 +50,7 @@ class Container:
         if definition.instance is None:
             definition.instance = target_type()
 
-        return definition.instance
+        return cast(T, definition.instance)
 
     def get[T](self, target_type: type[T]) -> T:
         """Readable alias for resolve()."""
