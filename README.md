@@ -138,7 +138,23 @@ one `APIRouter` per module, decorated at import time, later mounted onto the app
 `app.include_router(router)` inside a `create_app()` factory. The actual container lookup is
 deferred to request time: it reads `app.state.pywire_container` (set by `wire()`), falling back
 to the default container if `wire()` was never called for that app. `wire(app, ...)` only needs
-to run before the first *request* comes in — not before any route is decorated.
+to run before the first *request* comes in — not before any route is decorated. (HTTP routes
+only — WebSocket routes are not covered, same as before this redesign.)
+
+This safety does require `pywire.fastapi` itself to be imported before any module that
+decorates a route with `Autowired[T]` — e.g. `from pywire.fastapi import wire` near the top of
+your app's entrypoint, before importing your router modules. The global patch that makes
+decoration order-independent is installed at `pywire.fastapi`'s own import time; if a router
+module is imported first, without `pywire.fastapi` anywhere in `sys.modules` yet, the same
+decoration-time error this redesign eliminates can still occur.
+
+If you forget to call `wire(app, container=...)` for a specific app, this fails silently rather
+than loudly — parameters resolve against the default container, which may not have the
+component you expect registered (or may hold a different instance than intended). Always call
+`wire(app, container=...)` explicitly in apps that use more than the default container.
+
+If you previously called `wire(router, ...)` on an `APIRouter`, remove that call — `wire()` now
+only accepts the `FastAPI` app; routers no longer need to be wired individually.
 
 ## Architecture
 

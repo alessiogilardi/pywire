@@ -3,6 +3,17 @@
 Date: 2026-08-17
 Status: Approved for implementation planning
 
+**Correction (post-implementation):** Two claims below were found inaccurate during
+implementation review. `include_router()` in FastAPI 0.141.1 does not re-invoke
+`add_api_route` on the parent router (contrary to the "Data flow" section) —
+`_wire_endpoint` runs exactly once, at the route's original decoration time, which is
+early enough for correctness. Separately, the "naturally idempotent... skipped on a
+second pass" claim in "Components" is also inaccurate: a genuine second `_wire_endpoint`
+pass on an already-rewritten endpoint would re-rewrite it (get_type_hints still sees
+`Autowired[T]` since only `__signature__`, not `__annotations__`, was changed) rather
+than skip — harmless (same net result), but the stated mechanism was wrong. Neither
+correction changes the shipped design or its correctness.
+
 ## Motivation
 
 `pywire.fastapi.wire()` currently works by swapping `route_class` on a specific

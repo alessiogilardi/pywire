@@ -137,7 +137,15 @@ knowledge of this module.
   old `route_class` mechanism. `add_api_route` is the single choke point every
   `@router.get/post/put/...`-style decorator passes through to build an `APIRoute`, so patching
   it intercepts every route, on every `APIRouter`, independent of `wire()` call order, target
-  identity, or whether `wire()` was ever called for that specific router at all.
+  identity, or whether `wire()` was ever called for that specific router at all. (HTTP routes
+  only — `add_api_websocket_route` is not patched, so WebSocket routes are not covered; this is
+  not a regression, the old design didn't cover WebSockets either.)
+- This does require `pywire.fastapi` itself to be imported before any module that decorates a
+  route with `Autowired[T]` — e.g. `from pywire.fastapi import wire` near the top of the app's
+  entrypoint, before importing router modules. The global patch above is installed at
+  `pywire.fastapi`'s own import time; if a router module is imported first, with
+  `pywire.fastapi` not yet in `sys.modules`, the original decoration-time `FastAPIError` this
+  redesign eliminates can still occur.
 - `_install_patch()` guards against double-wrapping: it checks
   `getattr(APIRouter.add_api_route, "__pywire_patched__", False)` before patching, and returns
   immediately if already set. `_patched_add_api_route` is defined as a closure *inside*
@@ -168,11 +176,13 @@ knowledge of this module.
   is no longer a supported target. It sets `app.state.pywire_container = container or
   get_default_container()` and returns `app`. `app.state` is Starlette's own idiomatic
   per-app-instance storage extension point — no separate module-level registry needed.
-- **No more ordering limitation**: because every route is rewritten at decoration time
-  regardless of `wire()` call order, `wire(app)` can run at any point relative to route/router
-  decoration — before, after, or interleaved. If `wire()` is never called for an app at all,
-  `Autowired[T]` parameters resolve against the module-level default container (the same one
-  `@component` uses), via the `_resolve_autowired` fallback above. See
+- **No more ordering limitation** (see the import-order precondition above): because every
+  route is rewritten at decoration time regardless of `wire()` call order, `wire(app)` can run
+  at any point relative to route/router decoration — before, after, or interleaved. If `wire()`
+  is never called for an app at all, `Autowired[T]` parameters resolve against the module-level
+  default container (the same one `@component` uses), via the `_resolve_autowired` fallback
+  above — silently: a forgotten `wire(app, container=...)` does not fail, it just resolves
+  against a container that may not have the expected component registered. See
   `tests/test_fastapi_integration.py`.
 
 ### Versioning (`scripts/bump-version.sh`)

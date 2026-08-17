@@ -26,8 +26,16 @@ def _resolve_autowired(target: type) -> Callable[[Request], Any]:
     return resolve
 
 
-def _wire_endpoint(func: Any) -> Any:
+def _wire_endpoint(func: Any) -> None:
     """Rewrite bare Autowired[T] parameters into T = Depends(...) in place."""
+    if not (inspect.isfunction(func) or inspect.ismethod(func)):
+        # The patched add_api_route runs on every route in the process, not
+        # just wired ones -- endpoints that aren't plain functions/methods
+        # (e.g. a functools.partial, a supported FastAPI pattern) have no
+        # __module__/annotations shaped the way get_type_hints expects and
+        # simply never carry a bare Autowired[T] parameter to rewrite.
+        return
+
     hints = get_type_hints(func, include_extras=True)
     sig = inspect.signature(func)
     module_globals = vars(sys.modules[func.__module__])
@@ -47,9 +55,10 @@ def _wire_endpoint(func: Any) -> Any:
         )
 
     if changed:
-        func.__signature__ = sig.replace(parameters=new_params)
-
-    return func
+        # func is narrowed to FunctionType | MethodType by the isfunction/
+        # ismethod guard above; neither stub exposes a writable
+        # __signature__, even though CPython allows the assignment.
+        cast(Any, func).__signature__ = sig.replace(parameters=new_params)
 
 
 def _install_patch() -> None:

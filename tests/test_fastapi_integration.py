@@ -1,3 +1,4 @@
+import functools
 import importlib
 
 import pytest
@@ -330,3 +331,69 @@ def test_install_patch_does_not_double_wrap_on_module_reload():
     importlib.reload(pywire.fastapi)
 
     assert APIRouter.add_api_route is patched_before_reload
+
+
+def _partial_target(a: int) -> dict:
+    return {"a": a}
+
+
+def test_functools_partial_endpoint_is_not_broken_by_the_patch():
+    """A functools.partial endpoint (a supported FastAPI pattern, unrelated
+    to Autowired[T]) must still register correctly through the globally
+    patched add_api_route -- _wire_endpoint must not choke on non-function
+    callables it was never meant to inspect."""
+    app = FastAPI()
+
+    app.add_api_route(
+        "/partial", functools.partial(_partial_target, a=2), methods=["GET"]
+    )
+
+    client = TestClient(app)
+
+    response = client.get("/partial")
+
+    assert response.json() == {"a": 2}
+
+
+class TargetA:
+    def __init__(self) -> None:
+        self.origin = "container-a"
+
+
+class TargetB:
+    def __init__(self) -> None:
+        self.origin = "container-b"
+
+
+def test_two_apps_resolve_independently_via_their_own_wired_container():
+    """request.app.state.pywire_container means each app's routes resolve
+    against that specific app's container -- two apps in the same process,
+    each wired with a different container, must not cross-contaminate."""
+    container_a = Container()
+    container_a.register(TargetA)
+
+    container_b = Container()
+    container_b.register(TargetB)
+
+    app_a = FastAPI()
+    wire(app_a, container=container_a)
+
+    app_b = FastAPI()
+    wire(app_b, container=container_b)
+
+    @app_a.get("/origin")
+    def get_origin_a(target: Autowired[TargetA]) -> dict:
+        return {"origin": target.origin}
+
+    @app_b.get("/origin")
+    def get_origin_b(target: Autowired[TargetB]) -> dict:
+        return {"origin": target.origin}
+
+    client_a = TestClient(app_a)
+    client_b = TestClient(app_b)
+
+    response_a = client_a.get("/origin")
+    response_b = client_b.get("/origin")
+
+    assert response_a.json() == {"origin": "container-a"}
+    assert response_b.json() == {"origin": "container-b"}
