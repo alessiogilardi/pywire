@@ -97,8 +97,7 @@ uv pip install -e ".[fastapi]"
 
 ### Usage
 
-Call `wire()` once on your `FastAPI` app (or an `APIRouter`), **before** registering any
-routes on it:
+Call `wire()` once on your `FastAPI` app, at any point relative to route/router decoration:
 
 ```python
 from fastapi import FastAPI
@@ -131,13 +130,15 @@ def list_users(service: Autowired[UserService]) -> dict:
 If `container` is omitted, `wire()` falls back to the same module-level default container
 used by `@component`.
 
-### Limitation
+### Resolution
 
-`wire()` works by setting `route_class` on the target's router, so it only affects routes
-registered *after* the call — routes already added keep resolving as plain FastAPI routes.
-If you use multiple `APIRouter` instances (e.g. one per module), each one needs its own
-`wire()` call; wiring the main `FastAPI` app does not propagate to routers mounted onto it
-via `include_router()`.
+Decorating a route with a bare `Autowired[T]` parameter is always safe, on any `APIRouter`,
+regardless of whether `wire(app, ...)` has run yet — this holds even for the common pattern of
+one `APIRouter` per module, decorated at import time, later mounted onto the app with
+`app.include_router(router)` inside a `create_app()` factory. The actual container lookup is
+deferred to request time: it reads `app.state.pywire_container` (set by `wire()`), falling back
+to the default container if `wire()` was never called for that app. `wire(app, ...)` only needs
+to run before the first *request* comes in — not before any route is decorated.
 
 ## Architecture
 
