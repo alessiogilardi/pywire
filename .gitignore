@@ -11,3 +11,6 @@ wheels/
 
 # Claude Code agent worktrees
 .claude/worktrees/
+
+# superpowers subagent-driven-development scratch workspace
+.superpowers/
