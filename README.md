@@ -78,7 +78,10 @@ class UserService:
 
 Field injection (`Autowired[T]` as a class attribute) and constructor injection can be used
 together on the same class. An explicit keyword argument passed at construction time always
-wins over auto-resolution.
+wins over auto-resolution. Note that manually constructing a registered component (e.g.
+`SomeComponent(dep=manual_dep)`, bypassing `container.resolve(...)`) still registers that
+instance as the container's singleton for all future `resolve()` calls — the patched
+`__new__` always writes the instance into the registry, regardless of how it was created.
 
 ## FastAPI Integration
 
