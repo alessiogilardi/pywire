@@ -127,7 +127,7 @@ parameters:
 
 ### FastAPI integration (`fastapi.py`)
 
-Optional module (requires the `fastapi` extra, `pip install pywire[fastapi]`) that lets route
+Optional module (requires the `fastapi` extra, `uv pip install -e ".[fastapi]"`) that lets route
 handlers declare dependencies as bare `Autowired[T]` parameters instead of manual
 `Depends(...)` wiring. It only imports `fastapi`, never the reverse — `container.py` has no
 knowledge of this module.
