@@ -27,6 +27,15 @@ dev = [
 testpaths = ["tests"]
 pythonpath = ["src"]
 
+# basedpyright (e.g. Zed's default Python LSP) defaults to a much stricter
+# rule set than plain pyright's own "basic" mode (reportAny,
+# reportUnknownMemberType, reportUnnecessaryIsInstance, ...), which makes an
+# editor using it show warnings `uv run pyright` never reports. Pinning the
+# same "basic" mode here keeps both checkers in sync with the project's
+# actual, intended strictness level.
+[tool.basedpyright]
+typeCheckingMode = "basic"
+
 [tool.ruff]
 target-version = "py313"
 line-length = 88
