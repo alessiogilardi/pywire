@@ -15,18 +15,18 @@ if TYPE_CHECKING:
     from .container import Container
 
 
-def _resolve_autowired(target: type) -> Callable[[Request], Any]:
+def _resolve_autowired[T](target: type[T]) -> Callable[[Request], T]:
     """Return a Depends(...) resolver that reads the container from
     app.state at request time, falling back to the default container."""
 
-    def resolve(request: Request) -> Any:
+    def resolve(request: Request) -> T:
         container = getattr(request.app.state, "pywire_container", None)
         return (container or get_default_container()).resolve(target)
 
     return resolve
 
 
-def _wire_endpoint(func: Any) -> None:
+def _wire_endpoint(func: Callable[..., Any]) -> None:
     """Rewrite bare Autowired[T] parameters into T = Depends(...) in place."""
     if not (inspect.isfunction(func) or inspect.ismethod(func)):
         # The patched add_api_route runs on every route in the process, not
@@ -77,7 +77,13 @@ def _install_patch() -> None:
     original = APIRouter.add_api_route
 
     def _patched_add_api_route(
-        self: APIRouter, path: str, endpoint: Any, **kwargs: Any
+        self: APIRouter,
+        path: str,
+        endpoint: Callable[..., Any],
+        # Forwards to FastAPI's own add_api_route, whose kwargs (response_model,
+        # status_code, tags, ...) we deliberately don't duplicate/pin here --
+        # Any is the correct type for an untyped passthrough wrapper.
+        **kwargs: Any,  # noqa: ANN401
     ) -> None:
         _wire_endpoint(endpoint)
         original(self, path, endpoint, **kwargs)

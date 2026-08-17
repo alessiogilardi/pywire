@@ -32,7 +32,7 @@ target-version = "py313"
 line-length = 88
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "UP", "RUF"]
+select = ["E", "F", "I", "UP", "RUF", "ANN401"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["pywire"]

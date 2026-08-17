@@ -102,11 +102,14 @@ class Container:
             is not None
         }
 
+        # new/init forward arbitrary constructor args to the wrapped class's
+        # own __new__/__init__, whose signature is unknown until runtime --
+        # Any is unavoidable here, not a missed narrowing opportunity.
         def new(
             target_cls: type,
-            *args: Any,
-            **kwargs: Any,
-        ) -> Any:
+            *args: Any,  # noqa: ANN401
+            **kwargs: Any,  # noqa: ANN401
+        ) -> Any:  # noqa: ANN401
             definition = self._registry[target_cls]
 
             if definition.instance is not None:
@@ -124,9 +127,9 @@ class Container:
             return instance
 
         def init(
-            instance: Any,
-            *args: Any,
-            **kwargs: Any,
+            instance: Any,  # noqa: ANN401
+            *args: Any,  # noqa: ANN401
+            **kwargs: Any,  # noqa: ANN401
         ) -> None:
             if getattr(instance, "_di_initialized", False):
                 return
