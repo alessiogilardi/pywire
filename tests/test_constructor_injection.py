@@ -1,7 +1,11 @@
+from typing import TYPE_CHECKING
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from pywire import Autowired, Container
+
+if TYPE_CHECKING:
+    from decimal import Decimal
 
 
 class Dep:
@@ -56,6 +60,43 @@ class PlainDefaultConsumer:
         self.value = value
 
 
+class TypeCheckingOnlyConsumer:
+    """No Autowired parameters at all -- registration must not choke on the
+    unresolvable `Decimal` annotation, which only exists under
+    TYPE_CHECKING."""
+
+    def __init__(self, amount: "Decimal | None" = None) -> None:
+        self.amount = amount
+
+
+class TypeCheckingMixedDep:
+    pass
+
+
+class MixedResolvableConsumer:
+    """Mixes one unresolvable plain annotation with one resolvable
+    Autowired[Dep] parameter on the same __init__. Uses its own dedicated
+    Dep class (rather than reusing `Dep`) so this test's container.register
+    call cannot re-instrument a class already registered by another test --
+    see the comment above AppSettingsWithEnv/AppSettingsDefault for why that
+    matters."""
+
+    def __init__(
+        self,
+        dep: Autowired[TypeCheckingMixedDep],
+        amount: "Decimal | None" = None,
+    ) -> None:
+        self.amount = amount
+        self.dep = dep
+
+
+# These two class pairs (AppSettings*/SettingsConsumer*) are intentionally
+# NOT collapsed into one shared pair. Container._instrument monkey-patches
+# __new__/__init__ on the class object itself, not scoped per Container
+# instance, so registering the *same* class into two different Container()
+# instances (one per test) would have the second container silently reuse
+# state from the first -- a pre-existing Container limitation, unrelated to
+# pydantic-settings itself. Keeping the pairs separate sidesteps it.
 class AppSettingsWithEnv(BaseSettings):
     model_config = SettingsConfigDict(env_file=None)
 
@@ -147,6 +188,35 @@ def test_non_autowired_default_parameter_is_left_untouched():
     consumer = container.resolve(PlainDefaultConsumer)
 
     assert consumer.value is None
+
+
+def test_type_checking_only_annotation_does_not_break_registration():
+    """A class with a TYPE_CHECKING-only forward-referenced annotation on a
+    non-Autowired __init__ parameter, and no Autowired parameters at all,
+    must still register and resolve successfully (regression test: this
+    used to raise NameError from an unconditional get_type_hints() call)."""
+    container = Container()
+
+    container.register(TypeCheckingOnlyConsumer)
+
+    consumer = container.resolve(TypeCheckingOnlyConsumer)
+
+    assert consumer.amount is None
+
+
+def test_unresolvable_annotation_does_not_prevent_autowired_sibling():
+    """A constructor mixing one unresolvable plain annotation with one
+    resolvable Autowired[Dep] parameter still injects the Autowired
+    parameter correctly."""
+    container = Container()
+
+    container.register(TypeCheckingMixedDep)
+    container.register(MixedResolvableConsumer)
+
+    consumer = container.resolve(MixedResolvableConsumer)
+    dep = container.resolve(TypeCheckingMixedDep)
+
+    assert consumer.dep is dep
 
 
 def test_pydantic_settings_with_env_var_override(monkeypatch):

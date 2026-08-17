@@ -70,7 +70,29 @@ class Container:
         # get_type_hints() with no explicit globalns already resolves
         # correctly on its own, since it reads original_init.__globals__
         # internally, which is always the module __init__ was defined in.
-        init_hints = get_type_hints(original_init, include_extras=True)
+        #
+        # get_type_hints() evaluates *every* annotation on original_init, so
+        # a single unresolvable one (e.g. a TYPE_CHECKING-only import, or a
+        # forward reference to a name not yet defined) raises NameError and
+        # would abort registration for the whole class -- even for classes
+        # with no Autowired parameters at all. Fall back to resolving hints
+        # one parameter at a time so an unrelated unresolvable annotation
+        # cannot poison the rest of the class's registration. A parameter
+        # that still can't be resolved is simply left out of init_hints,
+        # which is safe: it will be treated as "not Autowired" below, same
+        # as any other non-injected parameter.
+        try:
+            init_hints = get_type_hints(original_init, include_extras=True)
+        except NameError:
+            init_hints = {}
+            init_globals = getattr(original_init, "__globals__", {})
+            for name, ann in getattr(original_init, "__annotations__", {}).items():
+                try:
+                    init_hints[name] = (
+                        eval(ann, init_globals) if isinstance(ann, str) else ann
+                    )
+                except NameError:
+                    continue
         # Skip "self" (the first parameter of an instance __init__).
         ctor_param_names = list(inspect.signature(original_init).parameters)[1:]
         ctor_autowired_params = {
