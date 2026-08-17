@@ -1,8 +1,34 @@
-from fastapi import FastAPI
-from fastapi.testclient import TestClient
+import importlib
 
-from pywire import Autowired, Container
+import pytest
+from fastapi import APIRouter, FastAPI
+from fastapi.testclient import TestClient
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+import pywire.fastapi
+from pywire import Autowired, Container, component
 from pywire.fastapi import wire
+
+
+class PreexistingRouterRepo:
+    def __init__(self) -> None:
+        self.value = "preexisting-repo-value"
+
+
+class PreexistingRouterService:
+    repo: Autowired[PreexistingRouterRepo]
+
+
+# Defined at true module scope, before any test function runs and before any
+# FastAPI() instance exists anywhere in this process -- the real-world
+# pattern the redesign targets: an APIRouter built and decorated in its own
+# module, at import time, with no FastAPI app in sight yet.
+router_defined_before_any_app = APIRouter()
+
+
+@router_defined_before_any_app.get("/preexisting")
+def get_preexisting(service: Autowired[PreexistingRouterService]) -> dict:
+    return {"value": service.repo.value}
 
 
 class Repo:
@@ -119,3 +145,188 @@ def test_wire_uses_explicit_container_instead_of_default():
     assert response.json() == {"origin": "custom-container"}
     assert CustomContainerService not in get_default_container()._registry
     assert CustomContainerService in my_container._registry
+
+
+class RouterRepo:
+    def __init__(self) -> None:
+        self.value = "router-repo-value"
+
+
+class RouterService:
+    """Dedicated classes for the router-decoration test below (rather than
+    reusing Repo/Service) to avoid the pre-existing cross-container
+    instrumentation leak: Container._instrument patches __new__/__init__ on
+    the class object itself, not per-container, so a class already
+    registered into another test's Container() would leak state here."""
+
+    repo: Autowired[RouterRepo]
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def call(self) -> int:
+        self.calls += 1
+        return self.calls
+
+
+def test_wire_router_before_decoration_supports_include_router_pattern():
+    """Real-world pattern: routes are declared on a per-module APIRouter via
+    decorators, then the router is mounted onto the app with
+    include_router(). The router is built and its route decorated with no
+    wire() call in sight -- wire() only ever runs on the FastAPI app, after
+    the router already exists, before include_router() mounts it. The
+    global add_api_route patch is what makes this safe: the route's bare
+    Autowired[T] parameter was already rewritten into Depends(...) at
+    decoration time, on the router itself, regardless of wire() having run
+    yet for anything."""
+    container = Container()
+    container.register(RouterRepo)
+    container.register(RouterService)
+
+    router = APIRouter()
+
+    @router.get("/calls")
+    def get_calls(service: Autowired[RouterService]) -> dict:
+        return {"calls": service.call()}
+
+    app = FastAPI()
+    wire(app, container=container)
+    app.include_router(router)
+
+    client = TestClient(app)
+
+    response = client.get("/calls")
+
+    assert response.json() == {"calls": 1}
+
+
+def test_route_decorated_before_fastapi_app_exists_still_resolves():
+    """A route decorated on a bare APIRouter before any FastAPI() instance
+    exists anywhere (see router_defined_before_any_app at module scope,
+    above) still resolves correctly once an app is later created, wired,
+    and the router is included. This is the exact scenario that raised
+    FastAPIError at import time under the old route_class mechanism."""
+    container = Container()
+    container.register(PreexistingRouterRepo)
+    container.register(PreexistingRouterService)
+
+    app = FastAPI()
+    wire(app, container=container)
+    app.include_router(router_defined_before_any_app)
+
+    client = TestClient(app)
+
+    response = client.get("/preexisting")
+
+    assert response.json() == {"value": "preexisting-repo-value"}
+
+
+@component
+class DefaultContainerRepo:
+    def __init__(self) -> None:
+        self.value = "default-container-value"
+
+
+def test_autowired_resolves_via_default_container_when_wire_never_called():
+    """If wire() is never called for an app at all, Autowired[T] route
+    parameters still resolve -- against the module-level default container,
+    the same one @component registers into."""
+    app = FastAPI()
+
+    @app.get("/default")
+    def get_default(repo: Autowired[DefaultContainerRepo]) -> dict:
+        return {"value": repo.value}
+
+    client = TestClient(app)
+
+    response = client.get("/default")
+
+    assert response.json() == {"value": "default-container-value"}
+
+
+def test_wire_rejects_invalid_target():
+    """wire() only accepts a FastAPI instance; anything else -- including a
+    bare APIRouter, which is no longer a supported target now that routing
+    is patched globally -- raises TypeError instead of failing later with
+    an unhelpful AttributeError."""
+    with pytest.raises(TypeError, match="FastAPI instance"):
+        wire(object())  # type: ignore[arg-type]
+
+    with pytest.raises(TypeError, match="FastAPI instance"):
+        wire(APIRouter())  # type: ignore[arg-type]
+
+
+class AppConfig(BaseSettings):
+    """A base config, resolved once and injected wherever a component
+    declares Autowired[AppConfig] -- field, constructor, or route parameter."""
+
+    model_config = SettingsConfigDict(env_file=None)
+
+    api_prefix: str = "/api"
+    db_url: str = "sqlite://memory"
+    request_timeout: float = 5.0
+
+
+class ConfigConsumingRepository:
+    config: Autowired[AppConfig]
+
+
+class ConfigConsumingService:
+    config: Autowired[AppConfig]
+    repository: Autowired[ConfigConsumingRepository]
+
+
+def test_app_config_is_shared_across_services_and_repositories(monkeypatch):
+    """A single AppConfig (BaseSettings) instance, registered once, is the
+    exact same object reached through every path a wired app can reach it:
+    a route's own Autowired[AppConfig] parameter, a Service's own config
+    field, and a Repository's config field reached transitively through the
+    Service. Proves the config is truly *shared*, not re-read/re-instantiated
+    per component."""
+    monkeypatch.setenv("API_PREFIX", "/v2")
+
+    container = Container()
+    container.register(AppConfig)
+    container.register(ConfigConsumingRepository)
+    container.register(ConfigConsumingService)
+
+    app = FastAPI()
+    wire(app, container=container)
+
+    @app.get("/describe")
+    def describe(
+        service: Autowired[ConfigConsumingService],
+        config: Autowired[AppConfig],
+    ) -> dict:
+        return {
+            "route_prefix": config.api_prefix,
+            "service_timeout": service.config.request_timeout,
+            "repository_db_url": service.repository.config.db_url,
+            "route_config_is_service_config": service.config is config,
+            "service_config_is_repository_config": (
+                service.repository.config is service.config
+            ),
+        }
+
+    client = TestClient(app)
+
+    response = client.get("/describe")
+    data = response.json()
+
+    expected = container.resolve(AppConfig)
+    assert data["route_prefix"] == "/v2" == expected.api_prefix
+    assert data["service_timeout"] == expected.request_timeout
+    assert data["repository_db_url"] == expected.db_url
+    assert data["route_config_is_service_config"] is True
+    assert data["service_config_is_repository_config"] is True
+
+
+def test_install_patch_does_not_double_wrap_on_module_reload():
+    """Re-running pywire.fastapi's module body (e.g. via importlib.reload)
+    must not wrap an already-patched APIRouter.add_api_route a second time
+    -- the guard inside _install_patch() is what makes this safe."""
+    patched_before_reload = APIRouter.add_api_route
+
+    importlib.reload(pywire.fastapi)
+
+    assert APIRouter.add_api_route is patched_before_reload

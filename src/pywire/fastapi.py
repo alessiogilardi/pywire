@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-import functools
 import inspect
 import sys
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, cast, get_type_hints
 
-from fastapi import APIRouter, Depends, FastAPI
-from fastapi.routing import APIRoute
+from fastapi import Depends, FastAPI, Request
+from fastapi.routing import APIRouter
 
 from .decorators import get_default_container
 from .markers import resolve_autowired_type
@@ -15,7 +15,18 @@ if TYPE_CHECKING:
     from .container import Container
 
 
-def _wire_endpoint(func: Any, container: Container) -> Any:
+def _resolve_autowired(target: type) -> Callable[[Request], Any]:
+    """Return a Depends(...) resolver that reads the container from
+    app.state at request time, falling back to the default container."""
+
+    def resolve(request: Request) -> Any:
+        container = getattr(request.app.state, "pywire_container", None)
+        return (container or get_default_container()).resolve(target)
+
+    return resolve
+
+
+def _wire_endpoint(func: Any) -> Any:
     """Rewrite bare Autowired[T] parameters into T = Depends(...) in place."""
     hints = get_type_hints(func, include_extras=True)
     sig = inspect.signature(func)
@@ -29,8 +40,11 @@ def _wire_endpoint(func: Any, container: Container) -> Any:
             new_params.append(param)
             continue
         changed = True
-        resolver = functools.partial(container.resolve, target)
-        new_params.append(param.replace(annotation=target, default=Depends(resolver)))
+        new_params.append(
+            param.replace(
+                annotation=target, default=Depends(_resolve_autowired(target))
+            )
+        )
 
     if changed:
         func.__signature__ = sig.replace(parameters=new_params)
@@ -38,35 +52,48 @@ def _wire_endpoint(func: Any, container: Container) -> Any:
     return func
 
 
-class _WiredRoute(APIRoute):
-    """APIRoute that resolves bare Autowired[T] endpoint parameters via pywire.
-
-    Internal implementation detail of wire() — not part of the public API.
+def _install_patch() -> None:
+    """Patch APIRouter.add_api_route once, so every route on every router
+    -- regardless of wire() call order -- has bare Autowired[T] parameters
+    rewritten before FastAPI validates them. Guarded by a marker attribute
+    on the installed wrapper so re-running this module's body (e.g. via
+    importlib.reload) never wraps an already-patched add_api_route again.
+    _patched_add_api_route is defined as a closure here, not at module
+    level, so a guarded-out call never touches the "original" callable an
+    already-installed wrapper depends on.
     """
+    if getattr(APIRouter.add_api_route, "__pywire_patched__", False):
+        return
 
-    def __init__(
-        self,
-        path: str,
-        endpoint: Any,
-        *,
-        container: Container | None = None,
-        **kwargs: Any,
+    original = APIRouter.add_api_route
+
+    def _patched_add_api_route(
+        self: APIRouter, path: str, endpoint: Any, **kwargs: Any
     ) -> None:
-        endpoint = _wire_endpoint(endpoint, container or get_default_container())
-        super().__init__(path, endpoint, **kwargs)
+        _wire_endpoint(endpoint)
+        original(self, path, endpoint, **kwargs)
+
+    setattr(_patched_add_api_route, "__pywire_patched__", True)
+    APIRouter.add_api_route = cast("Callable[..., None]", _patched_add_api_route)
 
 
-def wire(
-    target: FastAPI | APIRouter, *, container: Container | None = None
-) -> FastAPI | APIRouter:
-    """Enable Autowired[T] bare parameters on every route added to target from now on.
+_install_patch()
 
-    target is typically a FastAPI() app (which exposes its routing surface via
-    app.router) or a plain APIRouter(). Call this once, before defining routes;
-    it only affects routes registered afterward.
+
+def wire(app: FastAPI, *, container: Container | None = None) -> FastAPI:
+    """Associate container with app for Autowired[T] route parameter resolution.
+
+    Safe to call at any point relative to route/router decoration -- decorating
+    a route with a bare Autowired[T] parameter never fails, on any router,
+    whether or not wire() has been called yet. If wire() is never called for
+    an app, Autowired[T] parameters resolve against the module-level default
+    container (the same one @component uses).
+
+    Raises:
+        TypeError: if app is not a FastAPI instance.
     """
-    router = target.router if isinstance(target, FastAPI) else target
-    router.route_class = cast(
-        "type[APIRoute]", functools.partial(_WiredRoute, container=container)
-    )
-    return target
+    if not isinstance(app, FastAPI):
+        got = type(app).__name__
+        raise TypeError(f"wire() requires a FastAPI instance, got {got}")
+    app.state.pywire_container = container or get_default_container()
+    return app
