@@ -12,5 +12,8 @@ wheels/
 # Claude Code agent worktrees
 .claude/worktrees/
 
+# Claude Code local-only settings (per-developer, not shared)
+.claude/settings.local.json
+
 # superpowers subagent-driven-development scratch workspace
 .superpowers/
