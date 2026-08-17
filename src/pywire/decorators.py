@@ -1,9 +1,6 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:
-    from .container import Container
+from .container import Container
 
 _default_container: Container | None = None
 
@@ -16,7 +13,6 @@ def component[T](cls: type[T]) -> type[T]:
 
 def get_default_container() -> Container:
     """Return the default container."""
-    from .container import Container
 
     global _default_container
 
