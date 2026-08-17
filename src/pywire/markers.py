@@ -26,19 +26,17 @@ type Autowired[T] = Annotated[T, _AUTOWIRED]
 
 
 def resolve_autowired_type(
-    annotation: Any,  # noqa: ANN401
-    module_globals: dict[str, Any],
-) -> Any | None:  # noqa: ANN401
+    annotation: object,
+    module_globals: dict[str, object],
+) -> Any | None:  # noqa: ANN401  # pyright: ignore[reportExplicitAny]
     """Return the wrapped type if annotation is Autowired[T], else None.
 
     If Autowired[T] is unresolved (T is a forward-reference string that
     cannot be evaluated against module_globals), returns None.
 
-    annotation is a raw, unvalidated type-hint object -- it can genuinely be
-    anything (a type, a string, an Annotated[...] instance, ...) before this
-    function has inspected it, so Any is the honest type here, not a missed
-    narrowing opportunity. The same reasoning applies to the return type: it
-    passes through whatever was wrapped, unexamined.
+    The return type stays Any: it passes through whatever get_args()
+    extracted, unexamined, and typeshed's own get_args() is Any-returning --
+    narrowing here would be cosmetic, not a real static guarantee.
     """
     if get_origin(annotation) is not Autowired:
         return None

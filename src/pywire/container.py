@@ -61,7 +61,7 @@ class Container:
 
         raw_annotations = inspect.get_annotations(cls, eval_str=True)
         original_init = cls.__init__
-        original_new: Any = cls.__new__
+        original_new: Any = cls.__new__  # pyright: ignore[reportExplicitAny]
         module_globals = vars(sys.modules[cls.__module__])
 
         # Deliberately not passing globalns=module_globals here: original_init
@@ -102,14 +102,18 @@ class Container:
             is not None
         }
 
-        # new/init forward arbitrary constructor args to the wrapped class's
-        # own __new__/__init__, whose signature is unknown until runtime --
-        # Any is unavoidable here, not a missed narrowing opportunity.
+        # new forwards arbitrary constructor args to the wrapped class's own
+        # __new__, whose signature is unknown until runtime. Its return type
+        # is genuinely Any, not just unnarrowed: it must satisfy type.__new__'s
+        # own overloaded contract (return type.Self, i.e. "an instance of cls"),
+        # which object -- unlike Any -- is not assignable to (see cls.__new__ =
+        # new below); this is a real structural constraint, not a missed
+        # narrowing opportunity.
         def new(
             target_cls: type,
-            *args: Any,  # noqa: ANN401
-            **kwargs: Any,  # noqa: ANN401
-        ) -> Any:  # noqa: ANN401
+            *args: object,
+            **kwargs: object,
+        ) -> Any:  # noqa: ANN401  # pyright: ignore[reportExplicitAny]
             definition = self._registry[target_cls]
 
             if definition.instance is not None:
@@ -127,9 +131,9 @@ class Container:
             return instance
 
         def init(
-            instance: Any,  # noqa: ANN401
-            *args: Any,  # noqa: ANN401
-            **kwargs: Any,  # noqa: ANN401
+            instance: object,
+            *args: object,
+            **kwargs: object,
         ) -> None:
             if getattr(instance, "_di_initialized", False):
                 return
@@ -140,7 +144,11 @@ class Container:
                 # the registry.
                 return
 
-            instance._di_initializing = True
+            # setattr, not instance._di_initializing = True: instance is
+            # typed object (deliberately, see new/init's own docstring
+            # comment above), which has no declared _di_initializing
+            # attribute for a direct assignment to target.
+            setattr(instance, "_di_initializing", True)
 
             for field_name, annotation in raw_annotations.items():
                 field_type = resolve_autowired_type(annotation, module_globals)
@@ -168,8 +176,8 @@ class Container:
 
             original_init(instance, *args, **resolved_kwargs, **kwargs)
 
-            instance._di_initialized = True
-            instance._di_initializing = False
+            setattr(instance, "_di_initialized", True)
+            setattr(instance, "_di_initializing", False)
 
         cls.__new__ = new
         cls.__init__ = init
