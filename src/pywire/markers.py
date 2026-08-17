@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Annotated, Any, get_args, get_origin
+from typing import Annotated, Any, get_args, get_origin, override
 
 
 class _AutowiredMeta:
@@ -8,6 +8,7 @@ class _AutowiredMeta:
 
     __slots__ = ()
 
+    @override
     def __repr__(self) -> str:
         return "Autowired"
 
