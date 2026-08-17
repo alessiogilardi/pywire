@@ -132,39 +132,48 @@ handlers declare dependencies as bare `Autowired[T]` parameters instead of manua
 `Depends(...)` wiring. It only imports `fastapi`, never the reverse — `container.py` has no
 knowledge of this module.
 
-- `wire(target: FastAPI | APIRouter, *, container: Container | None = None) -> FastAPI |
-  APIRouter` resolves `router = target.router if isinstance(target, FastAPI) else target`,
-  then sets `router.route_class = functools.partial(_WiredRoute, container=container)` (cast
-  to `type[APIRoute]` for the type checker's benefit, since a `functools.partial` is not
-  literally a `type[APIRoute]` subclass, only callable like one) and returns `target`
-  unchanged.
-- `route_class` is FastAPI's own extension point on `APIRouter`: it's the callable the router
-  uses to build every `APIRoute` object for a path operation registered from that point
-  onward. Overriding it is what lets pywire intercept each endpoint's signature without
-  patching FastAPI itself.
-- `_WiredRoute(APIRoute)` overrides `__init__` to call
-  `_wire_endpoint(endpoint, container or get_default_container())` before delegating to
-  `APIRoute.__init__` — so the fallback to the default container is evaluated per route, at
-  the moment each route is registered (i.e. every time a `@app.get(...)`-style decorator
-  runs), not once at `wire()` call time.
-- `_wire_endpoint(func, container)` reads `get_type_hints(func, include_extras=True)`, and for
-  every parameter whose annotation resolves via `resolve_autowired_type` to some `target`
-  type, replaces that parameter's `inspect.Parameter` with one where `annotation=target` and
-  `default=Depends(functools.partial(container.resolve, target))`. It then reassigns
-  `func.__signature__` to the rewritten `inspect.Signature` — the `__signature__` rewrite
-  trick. FastAPI's own request-parsing introspects `__signature__`/`get_type_hints` on the
-  endpoint to decide how to satisfy each parameter; rewriting it before `APIRoute.__init__`
-  runs is what turns a bare `Autowired[Service]` parameter into an ordinary FastAPI
-  `Depends(...)` parameter from FastAPI's point of view. Parameters that are not
-  `Autowired[...]` are left untouched.
-- **Limitation**: `wire()` only affects routes registered *after* it runs, because it works
-  by swapping `route_class` on the router — routes already built keep whatever `route_class`
-  was active when they were constructed. Call `wire(app)` (or `wire(router)`) immediately
-  after creating the app/router, before any `@app.get(...)` / `@router.get(...)` calls. Each
-  `APIRouter` instance needs its own `wire()` call; wiring the main `FastAPI` app does not
-  propagate to routers mounted onto it via `include_router()`, since each router's routes are
-  built with whichever `route_class` was set on that specific router object at definition
-  time. See `tests/test_fastapi_integration.py`.
+- The module patches `fastapi.routing.APIRouter.add_api_route` once, at import time (a
+  top-level `_install_patch()` call, not something `wire()` triggers) — not per-target like the
+  old `route_class` mechanism. `add_api_route` is the single choke point every
+  `@router.get/post/put/...`-style decorator passes through to build an `APIRoute`, so patching
+  it intercepts every route, on every `APIRouter`, independent of `wire()` call order, target
+  identity, or whether `wire()` was ever called for that specific router at all.
+- `_install_patch()` guards against double-wrapping: it checks
+  `getattr(APIRouter.add_api_route, "__pywire_patched__", False)` before patching, and returns
+  immediately if already set. `_patched_add_api_route` is defined as a closure *inside*
+  `_install_patch()`, capturing the current (unpatched, on first call) `add_api_route` as
+  `original` — this closure-per-call-attempt design, rather than a module-level mutable
+  "original" variable, is what keeps re-running the module body (e.g. via `importlib.reload`)
+  safe: a second `_install_patch()` call either finds the guard already set and does nothing, or
+  (if it somehow ran on a still-unpatched `APIRouter`) captures a fresh, correct `original`.
+- `_patched_add_api_route(self, path, endpoint, **kwargs)` calls `_wire_endpoint(endpoint)` — no
+  container involved — then delegates to `original(self, path, endpoint, **kwargs)`.
+- `_wire_endpoint(func)` reads `get_type_hints(func, include_extras=True)`, and for every
+  parameter whose annotation resolves via `resolve_autowired_type` to some `target` type,
+  replaces that parameter's `inspect.Parameter` with one where `annotation=target` and
+  `default=Depends(_resolve_autowired(target))`. It then reassigns `func.__signature__` to the
+  rewritten `inspect.Signature` — the `__signature__` rewrite trick. FastAPI's own
+  request-parsing introspects `__signature__`/`get_type_hints` on the endpoint to decide how to
+  satisfy each parameter; rewriting it before `add_api_route` builds the `APIRoute` is what
+  turns a bare `Autowired[Service]` parameter into an ordinary FastAPI `Depends(...)` parameter
+  from FastAPI's point of view. Parameters that are not `Autowired[...]` are left untouched.
+- `_resolve_autowired(target)` returns a closure `resolve(request: Request) -> Any` that reads
+  `request.app.state.pywire_container` (falling back to `get_default_container()` if unset) and
+  calls `container.resolve(target)`. Container resolution is deferred to **request time**, not
+  baked in at decoration time — this is what allows decoration to always be safe regardless of
+  whether `wire(app, container=...)` has run yet: the container only needs to exist by the time
+  the first *request* comes in, not by the time routes are decorated.
+- `wire(app: FastAPI, *, container: Container | None = None) -> FastAPI` requires `app` to be a
+  `FastAPI` instance — it raises `TypeError` otherwise, including for a bare `APIRouter`, which
+  is no longer a supported target. It sets `app.state.pywire_container = container or
+  get_default_container()` and returns `app`. `app.state` is Starlette's own idiomatic
+  per-app-instance storage extension point — no separate module-level registry needed.
+- **No more ordering limitation**: because every route is rewritten at decoration time
+  regardless of `wire()` call order, `wire(app)` can run at any point relative to route/router
+  decoration — before, after, or interleaved. If `wire()` is never called for an app at all,
+  `Autowired[T]` parameters resolve against the module-level default container (the same one
+  `@component` uses), via the `_resolve_autowired` fallback above. See
+  `tests/test_fastapi_integration.py`.
 
 ### Versioning (`scripts/bump-version.sh`)
 
@@ -184,7 +193,7 @@ knowledge of this module.
 | `decorators.py` | `@component` and aliases, global container accessor |
 | `markers.py` | `Autowired[T]` (PEP 695 alias of `Annotated[T, _AUTOWIRED]`) and shared `resolve_autowired_type()` |
 | `exceptions.py` | `DependencyResolutionError` |
-| `fastapi.py` | Optional FastAPI integration: `wire()`, `_WiredRoute`, `_wire_endpoint` — resolves bare `Autowired[T]` route parameters |
+| `fastapi.py` | Optional FastAPI integration: `wire()`, `_install_patch`, `_wire_endpoint`, `_resolve_autowired` — resolves bare `Autowired[T]` route parameters via a global `add_api_route` patch |
 
 ## Conventions to preserve
 
