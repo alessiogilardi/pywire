@@ -1,5 +1,10 @@
 
+from typing import override
+
+import pytest
+
 from pywire import Autowired, Container, component, get_default_container
+from pywire.definitions import BeanDefinition
 
 
 def test_container_initialization():
@@ -107,3 +112,76 @@ def test_default_container_functionality():
     # Get it again to verify singleton behavior
     same_container = get_default_container()
     assert same_container is default_container
+
+
+class FailingComponent:
+    """__init__ always raises, so resolving it always rolls back."""
+
+    def __init__(self) -> None:
+        raise RuntimeError("construction failed")
+
+
+class ClearableComponent:
+    pass
+
+
+class _WriteOrderDefinition(BeanDefinition):
+    """BeanDefinition recording every write to `ready` and `instance`.
+
+    Teardown order is a real invariant -- resolve()'s lock-free fast path
+    reads `ready` and only then `instance`, so clearing `instance` first would
+    let an interleaved reader be handed None -- but it is invisible to a
+    single-threaded observer. Recording the writes pins the order without
+    racing threads.
+    """
+
+    def __init__(self, cls: type) -> None:
+        self.writes: list[str] = []
+        super().__init__(cls=cls)
+
+    @override
+    def __setattr__(self, name: str, value: object) -> None:
+        if name in ("ready", "instance"):
+            self.writes.append(name)
+
+        super().__setattr__(name, value)
+
+
+def test_rollback_clears_ready_before_instance():
+    """A failed construction clears `ready` before `instance`, the reverse of
+    the order resolve()'s lock-free fast path reads them in."""
+    container = Container()
+
+    container.register(FailingComponent)
+    definition = _WriteOrderDefinition(FailingComponent)
+    container._registry[FailingComponent] = definition
+    definition.writes.clear()
+
+    with pytest.raises(RuntimeError):
+        container.resolve(FailingComponent)
+
+    assert definition.writes[-2:] == ["ready", "instance"]
+    assert definition.instance is None
+    assert definition.ready is False
+
+    # The bean is genuinely disowned: resolving again rebuilds and fails again
+    # instead of handing out the rolled-back instance.
+    with pytest.raises(RuntimeError):
+        container.resolve(FailingComponent)
+
+
+def test_clear_instances_clears_ready_before_instance():
+    """clear_instances() drops each singleton in the same order as rollback."""
+    container = Container()
+
+    container.register(ClearableComponent)
+    definition = _WriteOrderDefinition(ClearableComponent)
+    container._registry[ClearableComponent] = definition
+
+    first = container.resolve(ClearableComponent)
+    definition.writes.clear()
+
+    container.clear_instances()
+
+    assert definition.writes == ["ready", "instance"]
+    assert container.resolve(ClearableComponent) is not first

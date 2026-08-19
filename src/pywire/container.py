@@ -157,8 +157,11 @@ class Container:
         """
         with self._lock:
             for definition in self._registry.values():
-                definition.instance = None
+                # `ready` first, mirroring the order resolve()'s lock-free fast
+                # path reads the two fields in: a reader interleaved between
+                # these writes must never see ready=True with instance gone.
                 definition.ready = False
+                definition.instance = None
 
     def _resolve(
         self,
@@ -297,13 +300,15 @@ class Container:
 
         `ready` is cleared alongside `instance` -- leaving it set would keep a
         rolled-back bean visible to the unsynchronised fast path in resolve()
-        forever, which is worse than the problem `ready` solves. `plan` is
-        deliberately preserved: it is a pure function of the class, and a
-        construction failure says nothing about its validity.
+        forever, which is worse than the problem `ready` solves -- and it is
+        cleared *first*, because that fast path reads `ready` before `instance`
+        and the two writes have to be undone in the opposite order to be
+        observed. `plan` is deliberately preserved: it is a pure function of
+        the class, and a construction failure says nothing about its validity.
         """
         for definition in resolution.created[created_mark:]:
-            definition.instance = None
             definition.ready = False
+            definition.instance = None
 
         del resolution.created[created_mark:]
 
@@ -368,9 +373,13 @@ class Container:
         through the constructor edge.
 
         `edge` is included in the scan because the edge closing the cycle has
-        not been pushed onto the stack yet.
+        not been pushed onto the stack yet. The scan starts at position + 1,
+        not at position: the edge recorded on the entry frame is how that type
+        was reached from *outside* the cycle, so counting it would reject a
+        legal field cycle merely for having been entered through an unrelated
+        constructor parameter.
         """
-        kinds = [kind for _, kind in resolution.stack[position:]]
+        kinds = [kind for _, kind in resolution.stack[position + 1 :]]
         kinds.append(edge)
 
         if _EdgeKind.CTOR not in kinds:
