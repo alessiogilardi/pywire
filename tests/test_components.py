@@ -75,26 +75,35 @@ def test_forward_reference():
     assert isinstance(service_b.service_a, ForwardRefServiceA)
 
 
+class SharedDep:
+    pass
+
+
+class SharedService:
+    dep: Autowired[SharedDep]
+
+
 def test_multiple_containers_independent():
-    """Test that different containers have independent singletons."""
+    """The same class registered in two containers must yield two distinct
+    singletons, along with two distinct dependency graphs.
+
+    The previous version of this test registered *different* classes in the
+    two containers, so its assertion was true by construction.
+    """
     container1 = Container()
     container2 = Container()
 
-    class Service1:
-        pass
+    for container in (container1, container2):
+        container.register(SharedDep)
+        container.register(SharedService)
 
-    class Service2:
-        pass
+    service1 = container1.resolve(SharedService)
+    service2 = container2.resolve(SharedService)
 
-    container1.register(Service1)
-    container2.register(Service2)
-
-    instance1 = container1.resolve(Service1)
-    instance2 = container2.resolve(Service2)
-
-    assert instance1 is not instance2
-    assert isinstance(instance1, Service1)
-    assert isinstance(instance2, Service2)
+    assert service1 is not service2
+    assert service1.dep is not service2.dep
+    assert service1.dep is container1.resolve(SharedDep)
+    assert service2.dep is container2.resolve(SharedDep)
 
 
 def test_unregistered_component_raises_error():
