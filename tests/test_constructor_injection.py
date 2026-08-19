@@ -1,8 +1,9 @@
 from typing import TYPE_CHECKING
 
+import pytest
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-from pywire import Autowired, Container
+from pywire import Autowired, CircularDependencyError, Container
 
 if TYPE_CHECKING:
     from decimal import Decimal
@@ -75,11 +76,7 @@ class TypeCheckingMixedDep:
 
 class MixedResolvableConsumer:
     """Mixes one unresolvable plain annotation with one resolvable
-    Autowired[Dep] parameter on the same __init__. Uses its own dedicated
-    Dep class (rather than reusing `Dep`) so this test's container.register
-    call cannot re-instrument a class already registered by another test --
-    see the comment above AppSettingsWithEnv/AppSettingsDefault for why that
-    matters."""
+    Autowired[TypeCheckingMixedDep] parameter on the same __init__."""
 
     def __init__(
         self,
@@ -90,32 +87,14 @@ class MixedResolvableConsumer:
         self.dep = dep
 
 
-# These two class pairs (AppSettings*/SettingsConsumer*) are intentionally
-# NOT collapsed into one shared pair. Container._instrument monkey-patches
-# __new__/__init__ on the class object itself, not scoped per Container
-# instance, so registering the *same* class into two different Container()
-# instances (one per test) would have the second container silently reuse
-# state from the first -- a pre-existing Container limitation, unrelated to
-# pydantic-settings itself. Keeping the pairs separate sidesteps it.
-class AppSettingsWithEnv(BaseSettings):
+class AppSettings(BaseSettings):
     model_config = SettingsConfigDict(env_file=None)
 
     db_url: str = "sqlite://memory"
 
 
-class AppSettingsDefault(BaseSettings):
-    model_config = SettingsConfigDict(env_file=None)
-
-    db_url: str = "sqlite://memory"
-
-
-class SettingsConsumerWithEnv:
-    def __init__(self, settings: Autowired[AppSettingsWithEnv]) -> None:
-        self.settings = settings
-
-
-class SettingsConsumerDefault:
-    def __init__(self, settings: Autowired[AppSettingsDefault]) -> None:
+class SettingsConsumer:
+    def __init__(self, settings: Autowired[AppSettings]) -> None:
         self.settings = settings
 
 
@@ -147,20 +126,19 @@ def test_field_and_constructor_injection_coexist():
     assert consumer.ctor_dep is container.resolve(CtorDep)
 
 
-def test_circular_dependency_via_constructor_injection():
-    """Circular dependencies wired through constructor parameters resolve
-    without infinite recursion, and both sides reference each other's
-    final instance once fully resolved."""
+def test_circular_constructor_dependencies_raise_with_the_chain():
+    """A cycle through constructor parameters has no fixed point: the
+    argument must be resolved before __init__ can run. It fails naming the
+    chain instead of injecting a half-constructed partner."""
     container = Container()
 
     container.register(CircularA)
     container.register(CircularB)
 
-    a = container.resolve(CircularA)
-    b = container.resolve(CircularB)
+    with pytest.raises(CircularDependencyError) as excinfo:
+        container.resolve(CircularA)
 
-    assert a.b is b
-    assert b.a is a
+    assert "CircularA -> CircularB -> CircularA" in str(excinfo.value)
 
 
 def test_forward_reference_constructor_parameter():
@@ -228,10 +206,10 @@ def test_pydantic_settings_with_env_var_override(monkeypatch):
 
     container = Container()
 
-    container.register(AppSettingsWithEnv)
-    container.register(SettingsConsumerWithEnv)
+    container.register(AppSettings)
+    container.register(SettingsConsumer)
 
-    consumer = container.resolve(SettingsConsumerWithEnv)
+    consumer = container.resolve(SettingsConsumer)
 
     assert consumer.settings.db_url == "postgres://test"
 
@@ -242,9 +220,9 @@ def test_pydantic_settings_with_default_value():
     via constructor Autowired injection."""
     container = Container()
 
-    container.register(AppSettingsDefault)
-    container.register(SettingsConsumerDefault)
+    container.register(AppSettings)
+    container.register(SettingsConsumer)
 
-    consumer = container.resolve(SettingsConsumerDefault)
+    consumer = container.resolve(SettingsConsumer)
 
     assert consumer.settings.db_url == "sqlite://memory"

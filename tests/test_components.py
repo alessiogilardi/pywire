@@ -1,6 +1,6 @@
 import pytest
 
-from pywire import Autowired, Container, component
+from pywire import Autowired, Container, RegistrationError, component
 
 
 def test_simple_component_resolution():
@@ -120,7 +120,7 @@ def test_duplicate_registration_raises_error():
 
     container.register(DuplicateService)
 
-    with pytest.raises(ValueError, match="is already registered"):
+    with pytest.raises(RegistrationError, match="is already registered"):
         container.register(DuplicateService)
 
 
