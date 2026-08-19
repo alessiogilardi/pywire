@@ -155,10 +155,9 @@ class RouterRepo:
 
 class RouterService:
     """Dedicated classes for the router-decoration test below (rather than
-    reusing Repo/Service) to avoid the pre-existing cross-container
-    instrumentation leak: Container._instrument patches __new__/__init__ on
-    the class object itself, not per-container, so a class already
-    registered into another test's Container() would leak state here."""
+    reusing Repo/Service) purely for test-case clarity: keeping each test's
+    component classes distinct makes assertions unambiguous about which
+    container and which instance produced a given value."""
 
     repo: Autowired[RouterRepo]
 
