@@ -47,75 +47,132 @@ and behavior:
 - `Container` (`container.py`) owns a private `_registry: dict[type, BeanDefinition]`.
   Each `Container` instance is an independent scope: the same class registered in two
   different containers produces two different singleton instances.
-- `container.register(cls)` stores a `BeanDefinition` (`definitions.py`) and immediately
-  calls `self._instrument(cls)` — it does **not** instantiate the class yet.
+- `container.register(cls)` stores a `BeanDefinition` (`definitions.py`) — it does
+  **not** instantiate or modify the class in any way.
 - `container.resolve(cls)` / `container.get(cls)` (alias) lazily creates the singleton
   on first access and returns the cached instance afterward.
 
-### Field injection mechanism (`Container._instrument`)
+### Injection mechanism (`Container.resolve`)
 
-This is the core trick of the library and the most important thing to understand before
-touching `container.py`:
+`register()` records; `resolve()` constructs. A registered class is **never** modified
+— no `__new__`/`__init__` patching, no attributes written onto user instances. This is
+the most important thing to understand before touching `container.py`.
 
-- `Autowired[T]` (`markers.py`) is a PEP 695 type alias, `type Autowired[T] =
-  Annotated[T, _AUTOWIRED]`, where `_AUTOWIRED` is a private sentinel. Static type checkers
-  see the field as plain `T`. At runtime, subscripting the alias (`Autowired[Foo]`) does
-  **not** collapse to `Annotated[Foo, _AUTOWIRED]` — `typing.get_origin` on it returns the
-  `Autowired` alias itself, not `Annotated`. The container checks `get_origin(annotation) is
-  Autowired` and pulls `T` out via `get_args` (single-element tuple, no metadata to filter —
-  the origin check alone proves it's an Autowired field).
-- `_instrument()` monkey-patches `__new__` and `__init__` on every registered class:
-  - The patched `__new__` writes the freshly created (but not yet `__init__`-ed) instance
-    into `BeanDefinition.instance` **before** running `__init__`. This early registration is
-    what makes circular dependencies resolvable — see below.
-  - The patched `__init__` walks `inspect.get_annotations(cls, eval_str=True)`, resolves each
-    `Autowired[...]` field (via `get_origin`/`get_args`; a string forward reference inside
-    `Autowired["X"]` surfaces as a plain `str`, not a `ForwardRef`, under the PEP 695 alias,
-    and is evaluated against the owning module's globals) to a concrete type, and injects the
-    resolved dependency via `self.resolve(field_type)` before calling the original `__init__`.
-- Circular dependencies (A depends on B, B depends on A) are handled via two instance flags
-  set on each object: `_di_initializing` and `_di_initialized`. If `__init__` is re-entered
-  on an instance that is already mid-construction (found via the early registry write in
-  `__new__`), it returns immediately, leaving the partially-constructed instance to be wired
-  up on an outer stack frame. See `tests/test_circular_dependencies.py` for the exact
-  scenarios this supports (mutual references, self-reference, forward-ref strings).
-- The `get_origin`/`get_args` extraction described above is not inlined in `container.py`:
-  it lives in `markers.py` as `resolve_autowired_type(annotation, module_globals)`, shared
-  verbatim between field injection (above) and constructor injection (below).
+`resolve()` first tries an unsynchronised fast path: if the definition's `ready` flag is
+set, the singleton is complete and is returned without taking the lock. Otherwise it
+takes the `RLock`, creates a `_Resolution` if it is the outermost call (storing it in
+`self._current` so a reentrant call from a component's `__init__` finds it), and
+delegates to `_resolve(target, edge, requester, resolution)`. The extra arguments thread
+*edge kinds* and the *requester label* through the recursion without changing the public
+signature. `_resolve` does:
 
-### Constructor injection mechanism (`Container._instrument`)
+1. look the `BeanDefinition` up, else `DependencyResolutionError`
+2. if the type is already on `resolution.stack`, a cycle is closing: reject it if any
+   edge from its position forward — **plus the incoming edge** — is a constructor edge,
+   otherwise return the partial instance. If it is not on the stack and
+   `definition.instance` is set, that is an ordinary cache hit
+3. record `len(resolution.created)`, push `(type, edge)` onto `resolution.stack`
+4. compute and cache `definition.plan` if absent — **before** allocating, so an
+   unplannable class is never created. Plan errors are re-raised via
+   `PyWireError.with_context()` to pick up the chain
+5. `type.__new__(type)`
+6. publish `definition.instance` and append to `resolution.created` — **early
+   publication**, what lets a field cycle close instead of recursing forever
+7. inject every planned field with `setattr` — **before `__init__`**, which is a
+   contract: a component's `__init__` body can read its injected fields
+8. resolve the planned constructor arguments
+9. `type.__init__(instance, **kwargs)`
+10. set `definition.ready = True` — success path only; this is what the fast path reads
+11. on exception: roll back to the mark from step 3
+12. finally: pop `resolution.stack`. The `_Resolution` itself is discarded by the
+    outermost `resolve()`, so there is no separate "clear when it empties" step
 
-Constructor parameters annotated `Autowired[T]` are resolved through the same
-`resolve_autowired_type` helper as fields, but the annotations are gathered differently
-because `inspect.get_annotations(cls, ...)` only sees class-level attributes, not `__init__`
-parameters:
+**Where the state lives.** `_Resolution` (stack + created log) is *call-scoped*, not
+container state: the previous design kept `_di_initializing` flags on user instances,
+and keeping the equivalent lists on `Container` would repeat that category error with a
+different victim. The one exception is `Container._current`, which holds the resolution
+in flight — necessary because `resolve()`'s public signature is fixed, so a reentrant
+call made from inside an `__init__` has no other way to find the stack it belongs to.
+Safe as a single field precisely because the lock admits one thread.
 
-- At registration time, `_instrument()` computes
-  `init_hints = get_type_hints(original_init, include_extras=True)` once, then intersects it
-  with `inspect.signature(original_init).parameters` (skipping `self`) to build
-  `ctor_autowired_params: dict[str, type]`.
-- This `get_type_hints()` call deliberately passes **no explicit `globalns`**. `original_init`
-  may be inherited from a base class defined in a different module than `cls`, so
-  `cls.__module__` would be the wrong module to resolve forward references and string
-  annotations against. `get_type_hints()` with no explicit `globalns` already resolves
-  correctly on its own, since it reads `original_init.__globals__` internally — which is
-  always the module `__init__` was actually defined in, regardless of which subclass is being
-  instrumented.
-- The patched `__init__` resolves each entry in `ctor_autowired_params` via `self.resolve(...)`
-  and passes it as a keyword argument to `original_init`, but only for parameter names not
-  already present in the caller-supplied `kwargs` — an explicitly passed keyword argument
-  always wins over auto-resolution.
-- Field injection and constructor injection can coexist on the same class: the field loop
-  (`setattr`) runs first, then the resolved constructor kwargs are computed and passed into
-  `original_init`.
-- Circular-dependency nuance specific to constructor injection: in an A↔B cycle, the partner
-  instance obtained via `self.resolve(...)` while resolving the other side's constructor
-  arguments is the **not-yet-initialized** instance — it was early-registered by `__new__`,
-  but its own `__init__` has not completed, since resolving *its* constructor arguments is
-  still in progress on an inner stack frame. This is analogous to, but not identical to, the
-  field-injection case, where some of the partner's fields may already be `setattr`-set by the
-  time the circular call resolves it. See `tests/test_constructor_injection.py` for the exact
-  scenario (`CircularA`/`CircularB`) this supports.
+**Cycle policy.** A cycle is legal only if *every* edge is a field edge. The rationale
+is mechanical, not contractual: a constructor parameter must be resolved before
+`__init__` can be called, so a constructor cycle has no fixed point, whereas a field
+can be assigned to an already-allocated object. The check lives at step 2 and inspects
+the *cycle*, not the current frame — checking the frame would make a mixed
+field/constructor cycle succeed or fail depending on which type was resolved first,
+since only one entry point reaches the cycle through the constructor edge. A
+`resolve()` called by hand from inside an `__init__` counts as a constructor edge.
+`_EdgeKind` is a plain `Enum`; `ROOT` and `FIELD` are behaviourally identical and kept
+apart only for readability in a printed stack.
+
+Caveat to keep in mind: in a legal field cycle the partner's `__init__` observes a
+partially-wired object. Field injection running before `__init__` is what makes that
+true, and it is the price of the contract in step 7.
+
+**Errors carry context by construction, not by mutation.** `PyWireError` is immutable:
+`chain` comes from the stack at the raising frame, and `requester` is passed *down* the
+recursion as an argument, so the frame that raises already knows both. `str(exc)`
+therefore never changes as the exception propagates. `plans.py` is pure inspection and
+cannot know the chain, so `Container._plan` re-raises its errors through
+`with_context()`, which returns a same-typed copy and never overwrites context the
+raising frame already supplied.
+
+**Rollback.** Every frame records `len(resolution.created)` on entry and, on exception,
+truncates back to it, clearing `instance` **and `ready`** on each definition dropped.
+Per-subtree rather than outermost-only, because a component whose `__init__` resolves an
+optional dependency inside `try/except` swallows the failure before any outer frame sees
+it — outermost-only rollback would leave those partials cached forever. Leaving `ready`
+set would be worse still: the fast path would keep handing out a disowned bean.
+`definition.plan` is never cleared — a plan is a pure function of the class.
+
+**Lazy planning.** `definition.plan` is computed on first resolution, not at
+registration. Registration therefore cannot fail because of an annotation unrelated to
+injection, and `Autowired["X"]` where `X` is defined later in the module resolves
+correctly. The cache lives on `BeanDefinition`, so two containers plan the same class
+twice; a global memo was rejected as process-wide mutable state in a redesign whose
+thesis is the absence of it.
+
+**Thread safety.** A single `threading.RLock` guards construction — reentrant because
+resolution recurses. Held coarsely, across user `__init__` bodies, because that is what
+guarantees one singleton per type: releasing it around `__init__` would let two threads
+both miss the cache and both build. Consequences: user `__init__` code runs under the
+lock, so a component that waits on another thread's `resolve()` deadlocks; rollback
+restores the registry but cannot undo `__init__` side effects, which a retry re-runs; and
+the `ready`-gated fast path relies on the GIL ordering the writes in steps 6 and 10, so a
+free-threaded build would need an explicit acquire/release pair.
+
+**Consequences to keep in mind.** `Cls()` written by hand is plain Python and is *not*
+wired — its `Autowired` fields are absent. Subclasses of a registered component are
+ordinary classes, and an `Autowired` field declared on a base **is** injected into a
+registered subclass unless re-annotated without `Autowired`. `__slots__` components work
+as long as they declare no injected field — that one is caught at injection time rather
+than plan time, because a base class may supply `__dict__`, so it is not statically
+decidable. A dataclass's `Autowired` field is a constructor parameter, not a field, so
+frozen dataclasses work. Classes whose `__new__` requires arguments, frozen classes with
+a genuinely field-injected dependency, positional-only `Autowired` parameters, and
+non-defaulted non-`Autowired` parameters all fail with an explicit
+`UnconstructibleComponentError`.
+
+### Annotation evaluation (`markers.py`)
+
+One evaluator, one policy. `evaluate_annotation()` is **total**: it never raises. An
+unresolvable name becomes a `_MissingName` placeholder (via a `dict` subclass passed as
+`eval` *locals*, which delegates to real globals and builtins before inventing
+anything), and any other evaluation failure yields one placeholder for the whole
+expression. That is what lets a single broken annotation coexist with valid `Autowired`
+fields on the same class.
+
+`resolve_autowired_type()` is then the single site that decides what a failure means,
+with a three-case contract: `Autowired[T]` resolvable → `T`; `Autowired[T]` unresolvable
+→ `AnnotationResolutionError` (returning `None` would be indistinguishable from "not
+Autowired" and would silently skip the injection); anything else → `None`, *including* a
+non-`Autowired` annotation that itself contains an unresolvable name, such as a
+`TYPE_CHECKING`-only import.
+
+`callable_hints()` wraps `get_type_hints()` with a per-annotation fallback through
+`evaluate_annotation`, and is shared by `plans.py` and `fastapi.py` — which is why
+`fastapi.py` needs no knowledge of `plans.py`.
 
 ### Component decorators (`decorators.py`)
 
@@ -156,12 +213,20 @@ knowledge of this module.
   (if it somehow ran on a still-unpatched `APIRouter`) captures a fresh, correct `original`.
 - `_patched_add_api_route(self, path, endpoint, **kwargs)` calls `_wire_endpoint(endpoint)` — no
   container involved — then delegates to `original(self, path, endpoint, **kwargs)`.
-- `_wire_endpoint(func)` reads `get_type_hints(func, include_extras=True)`, and for every
-  parameter whose annotation resolves via `resolve_autowired_type` to some `target` type,
-  replaces that parameter's `inspect.Parameter` with one where `annotation=target` and
-  `default=Depends(_resolve_autowired(target))`. It then reassigns `func.__signature__` to the
-  rewritten `inspect.Signature` — the `__signature__` rewrite trick. FastAPI's own
-  request-parsing introspects `__signature__`/`get_type_hints` on the endpoint to decide how to
+- `_wire_endpoint` reads annotations through `markers.callable_hints`, so an unrelated
+  unresolvable annotation on *any* endpoint in the process can no longer abort route
+  registration. When `resolve_autowired_type` raises for an `Autowired[T]` parameter,
+  the parameter is still rewritten — to `annotation=object` with
+  `Depends(_resolve_autowired_late(...))` — and the resolution is retried on the first
+  request, memoised thereafter. That keeps decoration unconditionally safe *and* makes
+  endpoints as lazy as components: a route may inject a service defined further down
+  its own module. A genuinely undefined name fails at request time, naming the endpoint.
+- For every parameter whose annotation resolves via `resolve_autowired_type` to some `target`
+  type, `_wire_endpoint` replaces that parameter's `inspect.Parameter` with one where
+  `annotation=target` and `default=Depends(_resolve_autowired(target))`. It then reassigns
+  `func.__signature__` to the rewritten `inspect.Signature` — the `__signature__` rewrite
+  trick. FastAPI's own request-parsing introspects `__signature__`/`get_type_hints` on the
+  endpoint to decide how to
   satisfy each parameter; rewriting it before `add_api_route` builds the `APIRoute` is what
   turns a bare `Autowired[Service]` parameter into an ordinary FastAPI `Depends(...)` parameter
   from FastAPI's point of view. Parameters that are not `Autowired[...]` are left untouched.
@@ -196,13 +261,17 @@ knowledge of this module.
 
 ### Module layout
 
+`BeanDefinition` is no longer exported from `pywire` — `Container.clear_instances()`
+covers what tests used it for.
+
 | File | Responsibility |
 |---|---|
-| `container.py` | `Container`: registry, resolve/register, `__new__`/`__init__` instrumentation |
-| `definitions.py` | `BeanDefinition` (registration metadata) and `Scope` enum (only `SINGLETON` is implemented; `PROTOTYPE` is declared but unused) |
+| `container.py` | `Container`: registry, register/resolve/get/clear_instances, `_Resolution` (call-scoped stack + undo log), construction sequence, per-subtree rollback, lock |
+| `plans.py` | `InjectionPlan.for_class()`: pure inspection of a class's Autowired fields and constructor parameters; `field_label`/`param_label`; rejects unconstructible classes |
+| `definitions.py` | `BeanDefinition`: registration metadata, singleton slot, `ready` flag, cached `InjectionPlan` |
 | `decorators.py` | `@component` and aliases, global container accessor |
-| `markers.py` | `Autowired[T]` (PEP 695 alias of `Annotated[T, _AUTOWIRED]`) and shared `resolve_autowired_type()` |
-| `exceptions.py` | `DependencyResolutionError` |
+| `markers.py` | `Autowired[T]`, `evaluate_annotation()`, `callable_hints()`, `resolve_autowired_type()` |
+| `exceptions.py` | Immutable `PyWireError` hierarchy with `with_context()` |
 | `fastapi.py` | Optional FastAPI integration: `wire()`, `_install_patch`, `_wire_endpoint`, `_resolve_autowired` — resolves bare `Autowired[T]` route parameters via a global `add_api_route` patch |
 
 ## Conventions to preserve

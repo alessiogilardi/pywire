@@ -1,6 +1,6 @@
 # PyWire — Dependency Injection Container
 
-A minimal Dependency Injection container for Python 3.12+, inspired by Spring's `@Component` and `@Autowired`.
+A minimal Dependency Injection container for Python 3.13+, inspired by Spring's `@Component` and `@Autowired`.
 
 ## Overview
 
@@ -27,9 +27,11 @@ class DBClient:
 - Field injection via `Autowired[T]`
 - Constructor injection via `Autowired[T]` parameters in `__init__`
 - Forward references support
-- Circular dependency detection and handling
-- Explicit, independent containers
-- `BeanDefinition` metadata for registered components
+- Circular dependencies through fields; a cycle passing through a
+  constructor parameter is rejected with the dependency chain
+- Explicit, independent containers — the same class registered in two
+  containers yields two independent singletons
+- Typed exception hierarchy rooted at PyWireError
 - Optional FastAPI integration (`pywire.fastapi.wire`) for bare `Autowired[T]` route parameters
 
 ## Installation
@@ -76,12 +78,69 @@ class UserService:
         self.repository = repository
 ```
 
-Field injection (`Autowired[T]` as a class attribute) and constructor injection can be used
-together on the same class. An explicit keyword argument passed at construction time always
-wins over auto-resolution. Note that manually constructing a registered component (e.g.
-`SomeComponent(dep=manual_dep)`, bypassing `container.resolve(...)`) still registers that
-instance as the container's singleton for all future `resolve()` calls — the patched
-`__new__` always writes the instance into the registry, regardless of how it was created.
+Field injection and constructor injection can be used together on the same class, and
+an injected field is set **before** your `__init__` body runs, so `__init__` can read
+it. An explicit keyword argument passed to `container.resolve(...)` is not supported;
+construct such objects yourself and register the instance.
+
+## Components are wired by the container, not by the class
+
+`register()` never modifies the class it registers. A component is wired only when the
+container builds it:
+
+```python
+container.register(Repository)
+
+wired = container.resolve(Repository)   # Autowired fields injected
+unwired = Repository()                  # plain Python: no injection
+```
+
+`Repository()` is an ordinary object — its `Autowired` fields are absent, and reading
+one raises `AttributeError`. Always go through `container.resolve(...)` (or
+`container.get(...)`).
+
+`container.clear_instances()` drops every cached singleton while keeping every
+registration, for callers that want a fresh object graph.
+
+### Inherited fields
+
+An `Autowired` field declared on a base class is injected into every subclass the
+container builds. Re-annotating it without `Autowired` opts out:
+
+```python
+class Base:
+    repo: Autowired[Repo]
+
+class Child(Base):
+    repo: Repo          # not injected; Child supplies it some other way
+```
+
+### Cycles
+
+Two components may depend on each other through **fields**. A cycle that passes
+through a **constructor parameter** is rejected with `CircularDependencyError` and the
+chain, whichever end you resolve from — a constructor argument has to exist before
+`__init__` can be called, so such a cycle has no fixed point. Convert one dependency
+from a constructor parameter to a field to express an intentional cycle.
+
+One caveat: while a field cycle is being closed, the partner's `__init__` observes a
+partially-wired object. Storing the reference is fine; calling methods on it from
+inside `__init__` is not.
+
+### Errors
+
+Everything pywire raises derives from `PyWireError`:
+
+| Error | Meaning |
+|---|---|
+| `RegistrationError` | The same class was registered twice in one container |
+| `UnconstructibleComponentError` | The container can never build this class — `__new__` needs arguments, a parameter cannot be supplied, or an injected field cannot be set |
+| `AnnotationResolutionError` | An `Autowired[...]` annotation names a type that cannot be resolved |
+| `DependencyResolutionError` | A dependency is not registered, or failed to build |
+| `CircularDependencyError` | A dependency cycle passes through a constructor parameter (a `DependencyResolutionError`) |
+
+Messages carry the resolution chain and the member that asked for the dependency, so a
+four-deep failure reads as one sentence.
 
 ## FastAPI Integration
 
@@ -160,11 +219,12 @@ only accepts the `FastAPI` app; routers no longer need to be wired individually.
 
 ```
 pywire/
-├── container.py       # Main DI container
+├── container.py       # Registry and resolve-time construction
+├── plans.py           # InjectionPlan: what a class needs
 ├── definitions.py     # BeanDefinition metadata
 ├── decorators.py      # @component decorator
 ├── exceptions.py      # Exception hierarchy
-├── markers.py         # Autowired[T] marker
+├── markers.py         # Autowired[T] marker and annotation evaluation
 ├── fastapi.py         # Optional FastAPI integration (wire())
 └── __init__.py        # Public API
 ```

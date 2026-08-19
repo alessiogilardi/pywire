@@ -158,8 +158,10 @@ class Container:
         with self._lock:
             for definition in self._registry.values():
                 # `ready` first, mirroring the order resolve()'s lock-free fast
-                # path reads the two fields in: a reader interleaved between
-                # these writes must never see ready=True with instance gone.
+                # path reads the two fields in: this narrows, but does not
+                # close, the window in which a reader interleaved between
+                # these two independent, non-atomic writes could observe
+                # ready=True with instance already gone.
                 definition.ready = False
                 definition.instance = None
 
@@ -288,9 +290,11 @@ class Container:
         `ready` is cleared alongside `instance` -- leaving it set would keep a
         rolled-back bean visible to the unsynchronised fast path in resolve()
         forever, which is worse than the problem `ready` solves -- and it is
-        cleared *first*, because that fast path reads `ready` before `instance`
-        and the two writes have to be undone in the opposite order to be
-        observed. `plan` is deliberately preserved: it is a pure function of
+        cleared *first*, because that fast path reads `ready` before `instance`:
+        undoing the writes in the opposite order narrows, but does not close,
+        the window in which an interleaved reader could observe a disowned
+        instance as ready, since the two stores remain independent and
+        non-atomic. `plan` is deliberately preserved: it is a pure function of
         the class, and a construction failure says nothing about its validity.
         """
         for definition in resolution.created[created_mark:]:
