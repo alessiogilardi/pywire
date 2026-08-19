@@ -7,15 +7,25 @@ from .decorators import (
     repository,
     service,
 )
-from .definitions import BeanDefinition
-from .exceptions import DependencyResolutionError
+from .exceptions import (
+    AnnotationResolutionError,
+    CircularDependencyError,
+    DependencyResolutionError,
+    PyWireError,
+    RegistrationError,
+    UnconstructibleComponentError,
+)
 from .markers import Autowired
 
 __all__ = [
+    "AnnotationResolutionError",
     "Autowired",
-    "BeanDefinition",
+    "CircularDependencyError",
     "Container",
     "DependencyResolutionError",
+    "PyWireError",
+    "RegistrationError",
+    "UnconstructibleComponentError",
     "agent",
     "client",
     "component",
