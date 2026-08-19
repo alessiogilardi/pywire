@@ -55,8 +55,12 @@ class CustomNew:
 class ResolvesInNew:
     """Pathological but legal: a __new__ that resolves during construction.
 
-    The only way to reach the "cycle closed before its instance existed" branch
-    in Container._resolve, which is why that branch is kept rather than deleted.
+    Self-resolving from inside __new__ still has to fail safely rather than
+    silently hand back None: a resolve() re-entered while the stack is
+    non-empty is always tagged as a constructor edge, whether the re-entrant
+    call originates from __init__ or from __new__, so this closes as an
+    ordinary constructor cycle -- see
+    test_new_that_resolves_during_construction_fails_explicitly.
     """
 
     container: Container | None = None
@@ -176,13 +180,11 @@ def test_new_that_resolves_during_construction_fails_explicitly() -> None:
 
     A resolve() re-entered while the stack is non-empty is always tagged as a
     constructor edge, regardless of whether the re-entrant call originates
-    from __init__ or from __new__ -- so this case is actually caught by
-    _reject_constructor_cycle, not by the "closed before its instance
-    existed" branch in Container._resolve that its docstring describes as
-    reachable only from here. That branch is therefore currently unreachable
-    dead code. The assertion below checks the guarantee that matters (a
-    CircularDependencyError, not a None field) rather than which branch
-    produced it.
+    from __init__ or from __new__ -- so this closes as an ordinary
+    constructor cycle through _reject_constructor_cycle. Asserting on the
+    exact message pins today's real behavior: it will fail loudly if the
+    edge-tagging logic ever changes in a way that stops treating a
+    __new__-issued resolve() as a constructor edge.
     """
     container = Container()
     container.register(ResolvesInNew)
@@ -192,7 +194,7 @@ def test_new_that_resolves_during_construction_fails_explicitly() -> None:
         with pytest.raises(CircularDependencyError) as excinfo:
             container.resolve(ResolvesInNew)
 
-        assert "ResolvesInNew" in str(excinfo.value)
+        assert "through a constructor parameter" in str(excinfo.value)
     finally:
         ResolvesInNew.container = None
 

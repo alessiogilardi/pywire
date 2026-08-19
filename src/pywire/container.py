@@ -195,19 +195,6 @@ class Container:
                 target_type, position, edge, requester, resolution
             )
 
-            if definition.instance is None:
-                # Reachable only through a user __new__ that resolves during
-                # construction: nothing else runs between pushing the frame and
-                # publishing the instance. Kept rather than deleted because the
-                # alternative is silently injecting None.
-                raise CircularDependencyError(
-                    f"Circular dependency on '{target_type.__name__}' closed "
-                    "before its instance existed: __new__ must not resolve "
-                    "dependencies.",
-                    chain=resolution.chain_through(target_type, start=position),
-                    requester=requester,
-                )
-
             # A legal field cycle: the partner is still under construction, but
             # its identity is final, which is all a stored reference needs.
             return definition.instance
