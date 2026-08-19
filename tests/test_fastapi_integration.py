@@ -449,3 +449,27 @@ def test_unresolvable_autowired_parameter_fails_at_request_time() -> None:
         TestClient(app).get("/broken")
 
     assert "broken" in str(excinfo.value)
+
+
+def test_decoration_tolerates_an_unrelated_unresolvable_annotation() -> None:
+    """A parameter annotation that is not Autowired[...] at all, and cannot be
+    resolved (a TYPE_CHECKING-only import, say), must not abort route
+    decoration. Before this task, _wire_endpoint called get_type_hints()
+    directly: one unresolvable annotation anywhere on the endpoint raised
+    NameError and aborted add_api_route for the whole route. callable_hints()
+    tolerates it per-annotation instead, via a fallback distinct from the
+    Autowired-raises-then-defers branch exercised by the two tests above --
+    this parameter is never wrapped in Autowired[...], so resolve_autowired_
+    type never raises for it; it simply resolves to None and is left alone."""
+    app = FastAPI()
+
+    @app.get("/unrelated")
+    def endpoint(
+        x: "SomeUndefinedName" = None,  # noqa: F821  # pyright: ignore[reportUndefinedVariable]
+    ) -> dict[str, str]:
+        return {"ok": "yes"}
+
+    response = TestClient(app).get("/unrelated")
+
+    assert response.status_code == 200
+    assert response.json() == {"ok": "yes"}
