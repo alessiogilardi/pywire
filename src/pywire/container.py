@@ -1,12 +1,10 @@
 from __future__ import annotations
 
-import inspect
-import sys
-from typing import Any, cast, get_type_hints
+from typing import Any, cast
 
 from .definitions import BeanDefinition
 from .exceptions import DependencyResolutionError
-from .markers import resolve_autowired_type
+from .plans import InjectionPlan
 
 type Registry = dict[type, BeanDefinition]
 
@@ -59,48 +57,9 @@ class Container:
     def _instrument(self, cls: type) -> None:
         """Install the __new__ and __init__ needed for field injection."""
 
-        raw_annotations = inspect.get_annotations(cls, eval_str=True)
+        plan = InjectionPlan.for_class(cls)
         original_init = cls.__init__
         original_new: Any = cls.__new__
-        module_globals = vars(sys.modules[cls.__module__])
-
-        # Deliberately not passing globalns=module_globals here: original_init
-        # may be inherited from a base class defined in a different module
-        # than cls, in which case cls.__module__ would be the wrong module.
-        # get_type_hints() with no explicit globalns already resolves
-        # correctly on its own, since it reads original_init.__globals__
-        # internally, which is always the module __init__ was defined in.
-        #
-        # get_type_hints() evaluates *every* annotation on original_init, so
-        # a single unresolvable one (e.g. a TYPE_CHECKING-only import, or a
-        # forward reference to a name not yet defined) raises NameError and
-        # would abort registration for the whole class -- even for classes
-        # with no Autowired parameters at all. Fall back to resolving hints
-        # one parameter at a time so an unrelated unresolvable annotation
-        # cannot poison the rest of the class's registration. A parameter
-        # that still can't be resolved is simply left out of init_hints,
-        # which is safe: it will be treated as "not Autowired" below, same
-        # as any other non-injected parameter.
-        try:
-            init_hints = get_type_hints(original_init, include_extras=True)
-        except NameError:
-            init_hints = {}
-            init_globals = getattr(original_init, "__globals__", {})
-            for name, ann in getattr(original_init, "__annotations__", {}).items():
-                try:
-                    init_hints[name] = (
-                        eval(ann, init_globals) if isinstance(ann, str) else ann
-                    )
-                except NameError:
-                    continue
-        # Skip "self" (the first parameter of an instance __init__).
-        ctor_param_names = list(inspect.signature(original_init).parameters)[1:]
-        ctor_autowired_params = {
-            name: target
-            for name in ctor_param_names
-            if (target := resolve_autowired_type(init_hints.get(name), module_globals))
-            is not None
-        }
 
         # new forwards arbitrary constructor args to the wrapped class's own
         # __new__, whose signature is unknown until runtime. Its return type
@@ -150,15 +109,8 @@ class Container:
             # attribute for a direct assignment to target.
             setattr(instance, "_di_initializing", True)
 
-            for field_name, annotation in raw_annotations.items():
-                field_type = resolve_autowired_type(annotation, module_globals)
-
-                if field_type is not None:
-                    setattr(
-                        instance,
-                        field_name,
-                        self.resolve(field_type),
-                    )
+            for field_name, field_type in plan.fields.items():
+                setattr(instance, field_name, self.resolve(field_type))
 
             # Explicitly passed keyword arguments win over auto-resolution.
             # Note: in an A<->B cycle resolved via constructor injection, the
@@ -170,7 +122,7 @@ class Container:
             # setattr before the circular call.
             resolved_kwargs = {
                 name: self.resolve(target)
-                for name, target in ctor_autowired_params.items()
+                for name, target in plan.ctor_params.items()
                 if name not in kwargs
             }
 
