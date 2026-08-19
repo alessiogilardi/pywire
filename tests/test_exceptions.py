@@ -98,4 +98,4 @@ def test_bean_definition_is_no_longer_public() -> None:
     """BeanDefinition is internal machinery; it is reachable from its own
     module, but not from the package's public surface."""
     with pytest.raises(ImportError):
-        from pywire import BeanDefinition  # type: ignore
+        from pywire import BeanDefinition  # noqa: F401 # type: ignore[attr-defined]
