@@ -46,8 +46,8 @@ class _Resolution:
     top-level resolution and are discarded when it ends. Keeping them here
     rather than on Container is what makes the cycle policy and the rollback
     testable without a container, and it is the same mistake -- construction
-    bookkeeping stored on a long-lived object -- that the deleted
-    _di_initializing instance flags used to make.
+    bookkeeping stored on a long-lived object -- that the deleted per-instance
+    initialization-tracking flags used to make.
     """
 
     stack: list[_Frame] = field(default_factory=list)
