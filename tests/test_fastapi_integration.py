@@ -7,7 +7,7 @@ from fastapi.testclient import TestClient
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 import pywire.fastapi
-from pywire import Autowired, Container, component
+from pywire import AnnotationResolutionError, Autowired, Container, component
 from pywire.fastapi import wire
 
 
@@ -397,3 +397,55 @@ def test_two_apps_resolve_independently_via_their_own_wired_container():
 
     assert response_a.json() == {"origin": "container-a"}
     assert response_b.json() == {"origin": "container-b"}
+
+
+# Decorated at *import* time, above the service it injects -- which is the only
+# shape that actually reaches the deferred path. A route decorated inside a test
+# body runs after the module has finished importing, so its annotation resolves
+# immediately and the deferred path is never exercised. app.get() goes straight
+# to app.router.add_api_route, so the endpoint is wired exactly once; do not
+# rewrite this as an APIRouter + include_router, which wires it twice.
+_late_app = FastAPI()
+
+
+@_late_app.get("/late")
+def _late_endpoint(service: Autowired["LateDefinedService"]) -> dict[str, str]:
+    return {"value": service.value()}
+
+
+class LateDefinedService:
+    """Defined below the route that injects it, on purpose."""
+
+    def value(self) -> str:
+        return "late"
+
+
+def test_endpoint_can_inject_a_service_defined_below_it() -> None:
+    """Decoration must not require the injected type to exist yet -- the
+    container's own planning is lazy for exactly this reason."""
+    container = Container()
+    container.register(LateDefinedService)
+
+    wire(_late_app, container=container)
+
+    response = TestClient(_late_app).get("/late")
+
+    assert response.status_code == 200
+    assert response.json() == {"value": "late"}
+
+
+def test_unresolvable_autowired_parameter_fails_at_request_time() -> None:
+    """A genuinely broken annotation must not break decoration; it fails on the
+    first request, with a pywire error naming the endpoint."""
+    app = FastAPI()
+
+    @app.get("/broken")
+    def broken(
+        service: Autowired["NoSuchService"],  # noqa: F821  # pyright: ignore[reportUndefinedVariable]
+    ) -> dict[str, str]:
+        return {"ok": "yes"}
+
+    with pytest.raises(AnnotationResolutionError) as excinfo:
+        TestClient(app).get("/broken")
+
+    assert "broken" in str(excinfo.value)

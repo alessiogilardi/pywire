@@ -3,13 +3,14 @@ from __future__ import annotations
 import inspect
 import sys
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Any, cast, get_type_hints
+from typing import TYPE_CHECKING, Any, cast
 
 from fastapi import Depends, FastAPI, Request
 from fastapi.routing import APIRouter
 
 from .decorators import get_default_container
-from .markers import resolve_autowired_type
+from .exceptions import AnnotationResolutionError
+from .markers import callable_hints, resolve_autowired_type
 
 if TYPE_CHECKING:
     from .container import Container
@@ -26,6 +27,39 @@ def _resolve_autowired[T](target: type[T]) -> Callable[[Request], T]:
     return resolve
 
 
+def _resolve_autowired_late(
+    annotation: object,
+    module_globals: dict[str, Any],
+    context: str,
+) -> Callable[[Request], Any]:
+    """Defer a currently-unresolvable Autowired[T] parameter to request time.
+
+    Mirrors the container's lazy planning: an endpoint may inject a service
+    defined further down its own module, and by the time a request arrives that
+    module is fully imported, so re-running the resolution succeeds. Raising at
+    decoration time instead would reintroduce the decoration-time failure the
+    global add_api_route patch exists to eliminate, and would leave endpoints
+    eager while components are lazy.
+
+    A genuinely undefined name still fails -- on the first request, naming the
+    endpoint. The resolved target is memoised, so the retry happens once rather
+    than per request.
+    """
+    resolved: list[type] = []
+
+    def resolve(request: Request) -> Any:  # noqa: ANN401
+        if not resolved:
+            resolved.append(
+                cast(type, resolve_autowired_type(annotation, module_globals, context))
+            )
+
+        container = getattr(request.app.state, "pywire_container", None)
+
+        return (container or get_default_container()).resolve(resolved[0])
+
+    return resolve
+
+
 def _wire_endpoint(func: Callable[..., object]) -> None:
     """Rewrite bare Autowired[T] parameters into T = Depends(...) in place."""
     if not (inspect.isfunction(func) or inspect.ismethod(func)):
@@ -36,17 +70,40 @@ def _wire_endpoint(func: Callable[..., object]) -> None:
         # simply never carry a bare Autowired[T] parameter to rewrite.
         return
 
-    hints = get_type_hints(func, include_extras=True)
+    hints = callable_hints(func)
     sig = inspect.signature(func)
     module_globals = vars(sys.modules[func.__module__])
 
     new_params = []
     changed = False
     for name, param in sig.parameters.items():
-        target = resolve_autowired_type(hints.get(name), module_globals)
+        annotation = hints.get(name)
+        context = f"{func.__qualname__}({name})"
+
+        try:
+            target = resolve_autowired_type(annotation, module_globals, context)
+        except AnnotationResolutionError:
+            # The name may simply be defined further down this module; retry on
+            # the first request rather than failing this decoration.
+            changed = True
+            new_params.append(
+                param.replace(
+                    # Inert: the Depends default means FastAPI never parses this
+                    # parameter from the request, so the annotation only has to
+                    # be something it accepts. The real type is unknown here by
+                    # definition.
+                    annotation=object,
+                    default=Depends(
+                        _resolve_autowired_late(annotation, module_globals, context)
+                    ),
+                )
+            )
+            continue
+
         if target is None:
             new_params.append(param)
             continue
+
         changed = True
         new_params.append(
             param.replace(
