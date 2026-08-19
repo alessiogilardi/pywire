@@ -2904,3 +2904,32 @@ Not in scope, noted while reviewing: `decorators._default_container` is lazily
 initialised through an unguarded module-level global, so two threads racing the very
 first `@component` could build two containers. Untouched here because `decorators.py` is
 out of scope for this plan.
+
+**`Container.clear_instances()` reentrancy corrupts the definition permanently.**
+Found and demonstrated during the final whole-branch review of this plan (not fixed —
+recorded here as a follow-up rather than reopening the branch). Repro:
+
+```python
+class Weird:
+    def __init__(self):
+        container.clear_instances()
+
+container.register(Weird)
+container.resolve(Weird)   # <Weird object ...>   (correct)
+container.resolve(Weird)   # None
+container.resolve(Weird)   # None   — forever
+```
+
+Mechanism: `clear_instances()` sets `ready=False, instance=None` on every definition,
+including the one currently under construction on an outer stack frame (the `RLock` is
+reentrant, so nothing blocks the call). `_create`'s outer frame then unconditionally sets
+`ready = True` on return, leaving `ready=True` with `instance=None` — exactly the state
+the lock-free fast path in `resolve()` trusts, so it returns `None` cast to `T`, silently
+and permanently, for every future `resolve()` call on that type.
+
+Exotic trigger (nothing sane calls `clear_instances()` from inside a component's own
+`__init__`), but the symptom is the same silent-`None`-typed-as-`T` failure class this
+whole redesign exists to eliminate, so it deserves a real fix rather than staying
+undocumented. Candidate fix: guard reentrancy (`if self._current is not None: raise ...`)
+or make `_create` set `ready` only when `definition.instance is instance` (i.e. nothing
+cleared it out from under this frame) rather than unconditionally.
