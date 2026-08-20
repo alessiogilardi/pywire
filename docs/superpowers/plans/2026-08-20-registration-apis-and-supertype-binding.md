@@ -852,8 +852,13 @@ git commit -m "✨ Add register_instance for objects the container cannot build"
 **Interfaces:**
 - Consumes: `Container._put`, `register`, `register_instance` (Tasks 2-3).
 - Produces:
-  - `Container.register[T](self, cls: type[T], *, as_type: type[T] | None = None) -> type[T]`
-  - `Container.register_instance[T](self, instance: T, *, as_type: type[T] | None = None) -> None`
+  - `Container.register[T](self, cls: type[T], *, as_type: type | None = None) -> type[T]`
+  - `Container.register_instance[T](self, instance: T, *, as_type: type | None = None) -> None`
+
+  `as_type` is a bare `type`, not `type[T]`: `type[T]` reads as a constraint but is
+  not one - a type checker solves `T` to the join of the two arguments and accepts an
+  unrelated class (measured on this project's pyright). The bare annotation says what
+  is true.
 
   Both **rebind**: the definition is stored under `as_type` and under nothing else.
   Task 5 calls `register(cls, as_type=...)` from the decorators.
@@ -957,7 +962,7 @@ Expected: FAIL — `TypeError: register() got an unexpected keyword argument 'as
 In `src/pywire/container.py`, change `register`:
 
 ```python
-    def register[T](self, cls: type[T], *, as_type: type[T] | None = None) -> type[T]:
+    def register[T](self, cls: type[T], *, as_type: type | None = None) -> type[T]:
         """Register a class as a component.
 
         The class is neither instantiated nor modified. Both happen lazily,
@@ -969,10 +974,13 @@ In `src/pywire/container.py`, change `register`:
                 supertype or Protocol its consumers depend on. This **rebinds**:
                 afterwards cls is no longer a key of its own. A caller who wants
                 both registers twice, and knows they are creating two beans.
-                The subtype relation is checked by the type checker: `T` is
-                solved to as_type, so passing an unrelated class is a static
-                error. It is not re-checked at runtime, because issubclass()
-                cannot check a structural Protocol at all.
+
+                The relation between cls and as_type is **not checked**, here or
+                by a type checker: annotating as_type as type[T] would only make
+                T widen to the join of the two, which accepts anything.
+                issubclass() cannot check a structural Protocol either, and a
+                Protocol is the main reason this parameter exists. A wrong
+                binding surfaces as an AttributeError on the resolved object.
         """
         self._put(as_type if as_type is not None else cls, BeanDefinition(cls=cls))
 
@@ -984,7 +992,7 @@ and `register_instance` — replace its signature and its `_put` call, leaving t
 
 ```python
     def register_instance[T](
-        self, instance: T, *, as_type: type[T] | None = None
+        self, instance: T, *, as_type: type | None = None
     ) -> None:
 ```
 
@@ -1004,7 +1012,8 @@ Add to `register_instance`'s docstring, under `Args:`:
 ```
             as_type: Key to register the object under, instead of its runtime
                 type. Needed when that type is a generated subclass -- a mock, a
-                proxy -- or when consumers should depend on an abstraction.
+                proxy -- or when consumers should depend on an abstraction. Not
+                checked against the object's own type; see register().
 ```
 
 Note `cls=target_type` stays the **concrete** type in both: the key lives in the

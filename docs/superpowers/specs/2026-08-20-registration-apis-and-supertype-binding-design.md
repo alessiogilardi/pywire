@@ -102,8 +102,8 @@ instance-as-factory" below.
 
 ```python
 class Container:
-    def register[T](self, cls: type[T], *, as_type: type[T] | None = None) -> type[T]: ...
-    def register_instance[T](self, instance: T, *, as_type: type[T] | None = None) -> None: ...
+    def register[T](self, cls: type[T], *, as_type: type | None = None) -> type[T]: ...
+    def register_instance[T](self, instance: T, *, as_type: type | None = None) -> None: ...
     def register_factory[T](self, target_type: type[T], factory: Callable[[], T]) -> None: ...
 ```
 
@@ -145,13 +145,29 @@ class UserService:
    generated subclass — a mock, a proxy — the default key would be surprising;
    that is exactly when `as_type` is passed.
 
-4. **The subtype relation is enforced statically, not at runtime.** With
-   `instance: T` / `cls: type[T]` and `as_type: type[T]`, a type checker solves `T`
-   to the supertype and verifies assignability — including for structural
-   `Protocol`s, which `issubclass()` cannot check at all unless they are
-   `@runtime_checkable` and non-data. Adding a best-effort `isinstance` check would
-   therefore be non-uniform (enforced for ABCs, silent for Protocols) without
-   catching more real errors.
+4. **The binding is not checked — not statically, not at runtime.** Writing
+   `as_type: type[T]` beside `cls: type[T]` looks like it constrains the two. It
+   does not: a type checker solves `T` to the *join* of the two arguments — `object`
+   in the worst case — and accepts an unrelated class. Measured against this
+   project's pyright before implementation, together with the same question for
+   `register_factory`: `register(Unrelated, as_type=Greeter)`,
+   `register_factory(Engine, an_async_def)`, `register_factory(Engine, lambda: Other())`
+   and `register_factory(Engine, lambda: None)` all type-check clean.
+   `typing.NoInfer`, which would pin `T` to `as_type` and make the relation
+   checkable, is absent from this project's Python (3.13.7) and reachable only
+   through `typing_extensions` — a runtime dependency the library refuses. The
+   signature therefore stops pretending: `as_type: type | None`, the same bare
+   `type` the decorators use.
+
+   Nor is the binding checked at runtime, and that is a separate decision with its
+   own reason. `issubclass` cannot check a structural `Protocol` at all, and a
+   `Protocol` is the main reason `as_type` exists — so the check would be silent
+   exactly where mis-binding is most likely, while lending confidence in the
+   nominal case. Its failure mode is also ordinary: a wrong binding yields a wrong
+   *object*, which raises `AttributeError` at the first call on it. That is a normal
+   Python programming error, not the silent `None`-typed-as-`T` class this library
+   polices — which is precisely why the two rejections in point 5 are treated
+   differently.
 
 5. **Two runtime rejections: `None`, and async factories.** `register_instance(None)`
    raises `RegistrationError`; a factory returning `None` raises
@@ -166,13 +182,15 @@ class UserService:
    object, which is not `None`, so a *coroutine* is published as the bean and
    injected everywhere, surfacing as an `AttributeError` on a coroutine plus a
    `RuntimeWarning: coroutine was never awaited` emitted at an unrelated moment.
-   This is a deliberate, narrow exception to point 4 — a type checker already
-   rejects `async def` against `Callable[[], T]` — justified on two grounds that do
-   not hold for `isinstance`: `iscoroutinefunction` is *reliable* and uniform,
-   whereas `isinstance` is structurally unable to check `Protocol`s; and the failure
-   it prevents does not produce a wrong object, it produces something that is not an
-   object at all. The check is knowingly **partial**: a callable object whose
-   `__call__` is async is not detected.
+   This check is redundant with nothing: `register_factory(Engine, make_engine)`
+   where `make_engine` is an `async def` type-checks clean, for the same join reason
+   as point 4. It is the only thing standing between an `async def` and a coroutine
+   published as a bean. It earns its place where an `isinstance` check does not, on
+   two grounds: `iscoroutinefunction` is *reliable* and uniform, whereas `isinstance`
+   is structurally unable to check `Protocol`s; and the failure it prevents does not
+   produce a wrong object, it produces something that is not an object at all. The
+   check is knowingly **partial**: a callable object whose `__call__` is async is
+   not detected.
 
 6. **Key collision is always `RegistrationError`**, for all three APIs, implemented
    once in a private `_put(key, definition)`.
@@ -189,7 +207,9 @@ class UserService:
    decorator path the decorated class keeps its own identity for the type checker
    and the static subtype check is given up — Python cannot express "a TypeVar
    bounded by another TypeVar", so the two are mutually exclusive, and identity is
-   worth more. The static check remains on `container.register`. Three details,
+   worth more — and since the measurement in point 4 shows `container.register` has
+   no static check either, this path gives up nothing the other one had. Three
+   details,
    fixed here so the implementation does not invent them: `as_type` is a **required**
    keyword in the called form, so `@repository()` raises `TypeError`. The `overload`
    pair makes that a static error for free; at runtime it costs one explicit check,
@@ -460,9 +480,13 @@ cost is that classes declared with `@component` land in the default container at
 import time, so replacing a single bean for a test means rebuilding the graph by
 hand. Revisit only with a concrete case.
 
-**Runtime `isinstance` validation of the binding.** Rejected: unreliable for
-`Protocol`s, therefore non-uniform, and redundant with the static check that the
-generic signature already provides.
+**Runtime `isinstance` validation of the binding.** Rejected: `issubclass` cannot
+check a structural `Protocol` at all, so the check would be unavailable exactly where
+`as_type` is most used and most easily got wrong, while lending false confidence in
+the nominal case. The first draft also called it redundant with a static check — that
+reason was **withdrawn** when the static check turned out not to exist (point 4); the
+argument above stands without it. What remains is that a mis-binding fails loudly at
+first use, as an ordinary `AttributeError`.
 
 **Dropping `register_factory` entirely** (`register_instance(create_engine(dsn))`
 already works). Considered seriously: a factory adds no capability, only laziness.
