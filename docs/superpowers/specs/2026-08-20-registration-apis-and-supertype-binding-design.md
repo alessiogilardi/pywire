@@ -191,8 +191,10 @@ class UserService:
    bounded by another TypeVar", so the two are mutually exclusive, and identity is
    worth more. The static check remains on `container.register`. Three details,
    fixed here so the implementation does not invent them: `as_type` is a **required**
-   keyword in the called form, so `@repository()` fails with a plain `TypeError`
-   without any branch written to handle it; `as_type` is the **only** parameter, and
+   keyword in the called form, so `@repository()` raises `TypeError`. The `overload`
+   pair makes that a static error for free; at runtime it costs one explicit check,
+   because a single `def` cannot express "required only when called with
+   parentheses". `as_type` is the **only** parameter, and
    the docstring promises no extensibility (`name=` would be the qualifier this spec
    rules out, and `lazy=` is meaningless in a container where everything is already
    lazy); **all five aliases** get the form, free of charge, since they are the same
