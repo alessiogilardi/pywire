@@ -3,7 +3,15 @@ import time
 
 import pytest
 
-from pywire import Autowired, Container, RegistrationError, component, decorators
+from pywire import (
+    Autowired,
+    Container,
+    RegistrationError,
+    component,
+    decorators,
+    get_default_container,
+    repository,
+)
 
 
 def test_simple_component_resolution():
@@ -197,3 +205,39 @@ def test_default_container_is_created_once_under_concurrency(
 
     assert len(seen) == worker_count
     assert len({id(container) for container in seen}) == 1
+
+
+def test_the_parameterized_decorator_binds_to_a_supertype():
+    from typing import Protocol
+
+    class Greeter(Protocol):
+        def greet(self) -> str: ...
+
+    @repository(as_type=Greeter)
+    class ItalianGreeter:
+        def greet(self) -> str:
+            return "ciao"
+
+    resolved = get_default_container().resolve(Greeter)
+
+    assert isinstance(resolved, ItalianGreeter)
+
+
+def test_the_parameterized_decorator_returns_the_decorated_class():
+    class Marker:
+        pass
+
+    @component(as_type=Marker)
+    class Concrete(Marker):
+        pass
+
+    assert Concrete.__name__ == "Concrete"
+    assert issubclass(Concrete, Marker)
+
+
+def test_calling_the_decorator_with_no_arguments_is_an_error():
+    with pytest.raises(TypeError, match="as_type"):
+
+        @component()  # type: ignore[call-overload]
+        class Service:
+            pass
