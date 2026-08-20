@@ -140,7 +140,7 @@ class Container:
             ),
         )
 
-    def register_instance[T](self, instance: T) -> None:
+    def register_instance(self, instance: object) -> None:
         """Register an already-built object as the singleton for its own type.
 
         For objects the container cannot build: a nested field of a loaded
