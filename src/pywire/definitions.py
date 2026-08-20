@@ -1,8 +1,23 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
+from enum import Enum, auto
 
 from .plans import InjectionPlan
+
+
+class _Origin(Enum):
+    """How a bean's instance is obtained.
+
+    Diagnostic only: no branch in the container reads this. It exists so a
+    definition inspected in a debugger states what it is, and so the provider
+    model is documented by the code and not only by prose.
+    """
+
+    CLASS = auto()
+    INSTANCE = auto()
+    FACTORY = auto()
 
 
 @dataclass(slots=True)
@@ -11,6 +26,13 @@ class BeanDefinition:
 
     Attributes:
         cls: The registered class.
+        factory: Callable that produces the instance, or None to construct `cls`
+            the ordinary way. A pushed instance is a factory returning the object
+            it was handed, which is what keeps clear_instances() and rollback
+            free of special cases: every bean is rebuildable, and rebuilding a
+            pushed one yields the same object.
+        origin: How the instance is obtained. Read by humans, never by the
+            container.
         instance: The singleton, once created. Published *before* __init__ runs,
             so a dependency cycle closing through a field can find it.
         ready: True once __init__ has returned. Because `instance` is published
@@ -30,6 +52,8 @@ class BeanDefinition:
     """
 
     cls: type
+    factory: Callable[[], object] | None = None
+    origin: _Origin = _Origin.CLASS
     instance: object | None = None
     ready: bool = False
     plan: InjectionPlan | None = None
