@@ -94,13 +94,27 @@ class Container:
         # belongs to. Safe as a single field because the lock admits one thread.
         self._current: _Resolution | None = None
 
-    def register[T](self, cls: type[T]) -> type[T]:
+    def register[T](self, cls: type[T], *, as_type: type | None = None) -> type[T]:
         """Register a class as a component.
 
         The class is neither instantiated nor modified. Both happen lazily,
         inside resolve().
+
+        Args:
+            cls: The class to construct.
+            as_type: Key to register it under, instead of cls itself -- the
+                supertype or Protocol its consumers depend on. This **rebinds**:
+                afterwards cls is no longer a key of its own. A caller who wants
+                both registers twice, and knows they are creating two beans.
+
+                The relation between cls and as_type is **not checked**, here or
+                by a type checker: annotating as_type as type[T] would only make
+                T widen to the join of the two, which accepts anything.
+                issubclass() cannot check a structural Protocol either, and a
+                Protocol is the main reason this parameter exists. A wrong
+                binding surfaces as an AttributeError on the resolved object.
         """
-        self._put(cls, BeanDefinition(cls=cls))
+        self._put(as_type if as_type is not None else cls, BeanDefinition(cls=cls))
 
         return cls
 
@@ -140,7 +154,9 @@ class Container:
             ),
         )
 
-    def register_instance(self, instance: object) -> None:
+    def register_instance(
+        self, instance: object, *, as_type: type | None = None
+    ) -> None:
         """Register an already-built object as the singleton for its own type.
 
         For objects the container cannot build: a nested field of a loaded
@@ -151,6 +167,13 @@ class Container:
         Stored as a factory returning the object it was handed. That is what
         makes teardown uniform: clear_instances() drops the cached instance like
         any other, and rebuilding hands back the same object.
+
+        Args:
+            instance: The already-built object to register.
+            as_type: Key to register the object under, instead of its runtime
+                type. Needed when that type is a generated subclass -- a mock, a
+                proxy -- or when consumers should depend on an abstraction. Not
+                checked against the object's own type; see register().
 
         Raises:
             RegistrationError: the key is already registered, or instance is
@@ -166,7 +189,7 @@ class Container:
             return instance
 
         self._put(
-            target_type,
+            as_type if as_type is not None else target_type,
             BeanDefinition(
                 cls=target_type,
                 factory=pushed_instance,
@@ -324,9 +347,7 @@ class Container:
             factory = definition.factory
 
             if factory is None:
-                instance = self._build_from_class(
-                    target_type, definition, requester, resolution
-                )
+                instance = self._build_from_class(definition, requester, resolution)
             else:
                 instance = self._build_from_factory(
                     target_type, factory, definition, requester, resolution
@@ -356,12 +377,19 @@ class Container:
 
     def _build_from_class(
         self,
-        target_type: type,
         definition: BeanDefinition,
         requester: str | None,
         resolution: _Resolution,
     ) -> object:
-        """Allocate target_type, inject its fields, and run its __init__."""
+        """Allocate definition.cls, inject its fields, and run its __init__.
+
+        Built from definition.cls, not from the registry key: as_type lets a
+        registration's key (a supertype or Protocol) differ from the concrete
+        class that must actually be constructed, and definition.cls is always
+        that concrete class -- see register()'s as_type parameter.
+        """
+        target_type = definition.cls
+
         if definition.plan is None:
             # Planned before allocating: a class that cannot be planned is
             # never created and never published.

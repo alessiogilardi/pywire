@@ -5,6 +5,7 @@ observes, never how the registry stores it.
 """
 
 import threading
+from typing import Protocol
 
 import pytest
 
@@ -269,3 +270,85 @@ def test_pushing_over_a_taken_key_is_refused():
 
     with pytest.raises(RegistrationError, match="is already registered"):
         container.register_instance(AppConfig())
+
+
+class UserRepository(Protocol):
+    def name(self) -> str: ...
+
+
+class PostgresUserRepo:
+    def name(self) -> str:
+        return "postgres"
+
+
+def test_a_class_bound_to_a_supertype_resolves_under_that_supertype():
+    container = Container()
+
+    container.register(PostgresUserRepo, as_type=UserRepository)
+
+    assert isinstance(container.resolve(UserRepository), PostgresUserRepo)
+
+
+def test_as_type_rebinds_and_does_not_add():
+    """The concrete type is no longer a key: consumers must use the abstraction."""
+    container = Container()
+
+    container.register(PostgresUserRepo, as_type=UserRepository)
+
+    with pytest.raises(DependencyResolutionError, match="not registered"):
+        container.resolve(PostgresUserRepo)
+
+
+def test_a_rebound_class_is_still_built_and_wired_by_the_container():
+    container = Container()
+
+    class Dependency:
+        pass
+
+    class Repo:
+        dep: Autowired[Dependency]
+
+        def name(self) -> str:
+            return "repo"
+
+    container.register(Dependency)
+    container.register(Repo, as_type=UserRepository)
+
+    resolved = container.resolve(UserRepository)
+
+    assert isinstance(resolved, Repo)
+    assert resolved.dep is container.resolve(Dependency)
+
+
+def test_an_autowired_field_resolves_through_the_supertype():
+    container = Container()
+
+    class Service:
+        repo: Autowired[UserRepository]
+
+    container.register(PostgresUserRepo, as_type=UserRepository)
+    container.register(Service)
+
+    assert container.resolve(Service).repo.name() == "postgres"
+
+
+def test_a_pushed_instance_can_be_bound_to_a_supertype():
+    container = Container()
+    repo = PostgresUserRepo()
+
+    container.register_instance(repo, as_type=UserRepository)
+
+    assert container.resolve(UserRepository) is repo
+
+
+def test_two_implementations_cannot_claim_the_same_supertype():
+    container = Container()
+
+    class OtherRepo:
+        def name(self) -> str:
+            return "other"
+
+    container.register(PostgresUserRepo, as_type=UserRepository)
+
+    with pytest.raises(RegistrationError, match="is already registered"):
+        container.register(OtherRepo, as_type=UserRepository)
