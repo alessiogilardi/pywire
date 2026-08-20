@@ -853,7 +853,12 @@ git commit -m "✨ Add register_instance for objects the container cannot build"
 - Consumes: `Container._put`, `register`, `register_instance` (Tasks 2-3).
 - Produces:
   - `Container.register[T](self, cls: type[T], *, as_type: type | None = None) -> type[T]`
-  - `Container.register_instance[T](self, instance: T, *, as_type: type | None = None) -> None`
+  - `Container.register_instance(self, instance: object, *, as_type: type | None = None) -> None`
+
+  `register_instance` carries **no** type parameter. It had one while `as_type` was
+  annotated `type[T]`; once that was withdrawn, `T` had a single use and pyright
+  reports `reportInvalidTypeVarUse` ("appears only once ... use object instead").
+  `register[T]` and `register_factory[T]` keep theirs — there `T` appears twice.
 
   `as_type` is a bare `type`, not `type[T]`: `type[T]` reads as a constraint but is
   not one - a type checker solves `T` to the join of the two arguments and accepts an
@@ -991,8 +996,8 @@ and `register_instance` — replace its signature and its `_put` call, leaving t
 `None` guard and the named closure exactly as they are:
 
 ```python
-    def register_instance[T](
-        self, instance: T, *, as_type: type | None = None
+    def register_instance(
+        self, instance: object, *, as_type: type | None = None
     ) -> None:
 ```
 
