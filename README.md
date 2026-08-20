@@ -133,7 +133,7 @@ Everything pywire raises derives from `PyWireError`:
 
 | Error | Meaning |
 |---|---|
-| `RegistrationError` | The same class was registered twice in one container |
+| `RegistrationError` | A key is already registered, `None` was pushed, or a factory is a coroutine function |
 | `UnconstructibleComponentError` | The container can never build this class — `__new__` needs arguments, a parameter cannot be supplied, or an injected field cannot be set |
 | `AnnotationResolutionError` | An `Autowired[...]` annotation names a type that cannot be resolved |
 | `DependencyResolutionError` | A dependency is not registered, or failed to build |
