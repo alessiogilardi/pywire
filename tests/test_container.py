@@ -185,3 +185,27 @@ def test_clear_instances_clears_ready_before_instance():
 
     assert definition.writes == ["ready", "instance"]
     assert container.resolve(ClearableComponent) is not first
+
+
+def test_clear_instances_from_init_never_publishes_a_ready_none():
+    """A bean whose __init__ clears the container drops its own cache entry,
+    and the frame that built it must not then mark the emptied definition
+    ready.
+
+    `ready=True` with `instance=None` is exactly the state resolve()'s
+    lock-free fast path trusts, so every later resolve() would hand back None
+    cast to T -- silently, permanently, and typed as if it were the component.
+    """
+    container = Container()
+
+    class SelfClearing:
+        def __init__(self) -> None:
+            container.clear_instances()
+
+    container.register(SelfClearing)
+
+    first = container.resolve(SelfClearing)
+    second = container.resolve(SelfClearing)
+
+    assert isinstance(first, SelfClearing)
+    assert isinstance(second, SelfClearing)

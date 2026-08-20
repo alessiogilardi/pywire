@@ -82,7 +82,9 @@ signature. `_resolve` does:
    contract: a component's `__init__` body can read its injected fields
 8. resolve the planned constructor arguments
 9. `type.__init__(instance, **kwargs)`
-10. set `definition.ready = True` — success path only; this is what the fast path reads
+10. set `definition.ready = True` — success path only, and only while
+    `definition.instance` is still the object this frame built; this is what
+    the fast path reads
 11. on exception: roll back to the mark from step 3
 12. finally: pop `resolution.stack`. The `_Resolution` itself is discarded by the
     outermost `resolve()`, so there is no separate "clear when it empties" step
@@ -125,6 +127,14 @@ optional dependency inside `try/except` swallows the failure before any outer fr
 it — outermost-only rollback would leave those partials cached forever. Leaving `ready`
 set would be worse still: the fast path would keep handing out a disowned bean.
 `definition.plan` is never cleared — a plan is a pure function of the class.
+
+**Reentrant `clear_instances()`.** The lock is reentrant, so a component whose
+`__init__` calls `container.clear_instances()` wipes the definition its own frame is
+building. Step 10 is conditional for that reason: publishing `ready` over an emptied
+definition would leave `ready=True` with `instance=None` — the one combination the fast
+path cannot detect — and every later `resolve()` would return `None` cast to `T`,
+silently and permanently. Such a bean is left uncached instead; the caller still
+receives the object its frame built, and the next `resolve()` rebuilds.
 
 **Lazy planning.** `definition.plan` is computed on first resolution, not at
 registration. Registration therefore cannot fail because of an annotation unrelated to

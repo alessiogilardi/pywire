@@ -245,7 +245,18 @@ class Container:
 
             # Last, and only on the success path: this is what the
             # unsynchronised fast path in resolve() reads.
-            definition.ready = True
+            #
+            # Guarded, because `instance` may no longer be the object this
+            # frame built. clear_instances() takes the same reentrant lock this
+            # frame already holds, so a component whose __init__ calls it wipes
+            # the very definition under construction. Marking that emptied
+            # definition ready would leave ready=True with instance=None -- the
+            # one combination the fast path cannot detect -- and every later
+            # resolve() would return None cast to T, silently and permanently.
+            # The bean is left uncached instead; the caller still receives the
+            # object this frame built.
+            if definition.instance is instance:
+                definition.ready = True
 
             return instance
         except BaseException:
