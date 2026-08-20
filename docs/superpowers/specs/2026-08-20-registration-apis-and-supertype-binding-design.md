@@ -1,6 +1,6 @@
 # Registration APIs: the push primitive and supertype binding
 
-Date: 2026-08-20
+Date: 2026-08-20 (revised the same day after a design grilling)
 Status: Approved for implementation
 
 This is **spec 2 of 2**. Spec 1
@@ -58,6 +58,15 @@ without weakening any invariant spec 1 established.
 - **Wiring pushed objects.** The container injects only into objects it constructs.
 - **`configuration` as a decorator alias.** A one-line change to `decorators.py`
   that shares nothing with this spec; if wanted, it gets its own commit.
+- **`unregister(key)`.** No use case, and it would reopen the question of what
+  happens to instances already injected elsewhere.
+- **`is_registered(key)` / `__contains__`.** It invites "ask, then resolve", which
+  is not even atomic under the lock.
+- **Chaining.** `register_instance` and `register_factory` return `None`. A caller
+  who needs the object in hand assigns it on its own line first. The resulting
+  asymmetry — `register` returns `cls`, the other two return `None` — is deliberate:
+  `register` must work as a decorator, and nobody writes
+  `@container.register_instance` above a class.
 
 ## Chosen approach
 
@@ -144,12 +153,26 @@ class UserService:
    therefore be non-uniform (enforced for ABCs, silent for Protocols) without
    catching more real errors.
 
-5. **Only `None` is rejected at runtime.** `register_instance(None)` raises
-   `RegistrationError`; a factory returning `None` raises
+5. **Two runtime rejections: `None`, and async factories.** `register_instance(None)`
+   raises `RegistrationError`; a factory returning `None` raises
    `DependencyResolutionError` at resolve time. `None` is singled out because it is
    the one value that would corrupt the `ready`/`instance` invariant into
    `ready=True, instance=None` — the "silent `None` typed as `T`" failure class this
    redesign exists to eliminate.
+
+   `register_factory` additionally rejects a coroutine function
+   (`inspect.iscoroutinefunction(factory)`) with `RegistrationError`. Without it,
+   `async def make_client()` passes every check: calling it returns a coroutine
+   object, which is not `None`, so a *coroutine* is published as the bean and
+   injected everywhere, surfacing as an `AttributeError` on a coroutine plus a
+   `RuntimeWarning: coroutine was never awaited` emitted at an unrelated moment.
+   This is a deliberate, narrow exception to point 4 — a type checker already
+   rejects `async def` against `Callable[[], T]` — justified on two grounds that do
+   not hold for `isinstance`: `iscoroutinefunction` is *reliable* and uniform,
+   whereas `isinstance` is structurally unable to check `Protocol`s; and the failure
+   it prevents does not produce a wrong object, it produces something that is not an
+   object at all. The check is knowingly **partial**: a callable object whose
+   `__call__` is async is not detected.
 
 6. **Key collision is always `RegistrationError`**, for all three APIs, implemented
    once in a private `_put(key, definition)`.
@@ -166,7 +189,15 @@ class UserService:
    decorator path the decorated class keeps its own identity for the type checker
    and the static subtype check is given up — Python cannot express "a TypeVar
    bounded by another TypeVar", so the two are mutually exclusive, and identity is
-   worth more. The static check remains on `container.register`.
+   worth more. The static check remains on `container.register`. Three details,
+   fixed here so the implementation does not invent them: `as_type` is a **required**
+   keyword in the called form, so `@repository()` fails with a plain `TypeError`
+   without any branch written to handle it; `as_type` is the **only** parameter, and
+   the docstring promises no extensibility (`name=` would be the qualifier this spec
+   rules out, and `lazy=` is meaningless in a container where everything is already
+   lazy); **all five aliases** get the form, free of charge, since they are the same
+   function object — which is exactly why the spec states it, as "free" turns into a
+   bug the day someone differentiates an alias.
 
 ## Internal mechanics
 
@@ -290,9 +321,14 @@ never be published early.
 `definition.instance`, which for a factory bean would be `None`. The proof above says
 that branch is unreachable for factory beans, so the three lines
 `if definition.instance is None: raise CircularDependencyError(...)` are dead code by
-construction. They are included anyway, for the same reason spec 1 bought the `ready`
-guard in `_create`: the failure they prevent is a silent `None` typed as `T`, the
-one class of failure this library refuses to allow a future edge kind to reintroduce.
+construction — which sits awkwardly next to this repo's rule that dead code gets
+removed. They are included anyway, on the argument that "dead code" is the wrong
+category: this is an **invariant check**, placed exactly where the invariant could
+break silently, and its value is in the future rather than today. The proof depends
+on "`_EdgeKind` has three values and only `CTOR` counts". Whoever adds a fourth edge
+kind two years from now will not re-read the proof in this document; they will find
+three lines telling them what they just broke. Same purchase as the `ready` guard in
+`_create`, which likewise protects against a caller nobody sane writes.
 
 ### Thread safety
 
@@ -316,6 +352,7 @@ No new exception classes; `__init__.py` is unchanged (`_Origin` is private).
 |---|---|---|
 | key already registered (all three APIs) | `RegistrationError` | `'UserRepository' is already registered in this container.` |
 | `register_instance(None)` | `RegistrationError` | `Cannot register None as an instance.` |
+| `register_factory` with an `async def` | `RegistrationError` | `The factory for 'AsyncClient' is a coroutine function: it would publish a coroutine as the bean.` |
 | factory returns `None` | `DependencyResolutionError` | `The factory registered for 'Engine' returned None.` |
 | `resolve(concrete)` after rebinding | `DependencyResolutionError` | existing message, unchanged |
 | cycle through a factory | `CircularDependencyError` | existing message, unchanged |
@@ -356,13 +393,17 @@ deterministically (a sleeping factory) rather than racing for it.
 **Decorators** — bare `@repository` and `@repository(as_type=UserRepository)` both
 register; the bare form's behavior is byte-for-byte today's.
 
-**FastAPI smoke test, scheduled early in the plan.** `fastapi.py` rewrites a
-parameter to `annotation=target` plus `Depends(...)`. With `as_type=SomeProtocol`,
-`target` is a `Protocol`, and it must be verified that FastAPI/pydantic does not try
-to validate it (it should not — a parameter with a `Depends` default is not a
-request field — but this is precisely where an assumption is expensive). If it
-fails, the story this spec tells about DIP changes, so the plan must find out early
-rather than at the end.
+**Async factory** — `register_factory` with an `async def` raises at registration;
+the coroutine never reaches the registry.
+
+**FastAPI + `Protocol`: verified, not assumed.** `fastapi.py` rewrites a parameter to
+`annotation=target` plus `Depends(...)`, so `as_type=SomeProtocol` makes `target` a
+`Protocol`. Probed against this project's environment before writing this revision: a
+bare `Protocol` annotation with a `Depends` default returns 200, a `@runtime_checkable`
+one returns 200, and `/openapi.json` builds successfully — FastAPI does not treat a
+`Depends`-defaulted parameter as a request field, so it never validates the
+annotation. This is therefore an ordinary regression test in
+`tests/test_fastapi_integration.py`, not a risk the plan must retire early.
 
 ## Documentation
 
@@ -371,7 +412,12 @@ rather than at the end.
   `BaseSettings` with its own `env_prefix` is zero-argument constructible and can
   simply be registered, which already works today. Push is required when
   configuration depends on entry-point input (CLI arguments, a file chosen at
-  runtime, values already in memory).
+  runtime, values already in memory). It must also spell out the **two-beans-of-one-type
+  workaround** rather than leaving it implicit in a non-goal: `primary_db` and
+  `replica_db`, both `PostgresConfig`, cannot both be registered, and the way out is a
+  distinct type in the configuration model (`class ReplicaDbConfig(PostgresConfig)`).
+  The failure is loud and immediate — `RegistrationError` at startup, never a wrong
+  bean injected quietly — which is what makes the limitation affordable.
 - **CLAUDE.md**: update the `container.py` and `definitions.py` rows of the module
   table; add the provider model, the `as_type` policy (rebinding, never scanning),
   and the factory-cycle proof under "Registration & resolution flow"; reword the
@@ -424,11 +470,36 @@ loop rather than import time), and rebuild-after-`clear_instances()`. Its
 incremental cost is the field the design needed anyway; it is `register_instance`
 that is the sugar, not the reverse.
 
-## Open question left deliberately
+## `origin`: kept knowingly, read by humans only
 
-`origin` has exactly one reader today: the dataclass `repr`. The "factory returned
-`None`" message does not need it, since `register_instance(None)` is already
-rejected at registration, so a `None` there always comes from a real factory. The
-field is kept for human debugging and introspection — legitimate, but it should be
-described that way and not passed off as necessary. If a second reader does not
-appear during implementation, dropping it is the honest move.
+`origin` has exactly one reader: the dataclass `repr`. No error message consults it —
+the "factory returned `None`" message does not need it, since `register_instance(None)`
+is rejected at registration, so a `None` there always comes from a real factory.
+Dropping it was proposed during the design review and refused deliberately: the field
+is executable documentation of the provider model, and it is what makes a definition
+legible at a breakpoint. Its cost is one `__slots__` entry and one line every reader
+of `definitions.py` must understand.
+
+Consequence for the implementation: the closures behind `register_instance` and the
+`repr` must be **named**, not anonymous lambdas, so that a definition inspected in a
+debugger reads as `origin=INSTANCE, factory=<pushed_instance ...>` rather than
+`factory=<lambda ...>`.
+
+## Implementation order
+
+Six commits, each a valid state of the repository (`uv run pytest` green at every
+one), following spec 1's discipline:
+
+1. **Refactor only, no behavior change**: extract `_build_from_class` out of
+   `_create`. Tests unchanged and green. Kept separate because this repo's rules
+   require refactoring to be separated from feature work.
+2. `factory` field, `_origin`, `_build_from_factory`, `_put`, `register_factory`,
+   the async rejection, and the defensive guard. The guard ships here rather than
+   in a commit of its own: alone it would be an untestable commit, which is
+   precisely its own weakness.
+3. `register_instance` as sugar over the factory path, plus the `None` rejection.
+4. `as_type` on `register` and `register_instance`. After commit 2, not before,
+   because it builds on `_put` — leading with it would mean writing the collision
+   rule twice.
+5. Dual-form decorators, all five aliases.
+6. README and `CLAUDE.md`.
