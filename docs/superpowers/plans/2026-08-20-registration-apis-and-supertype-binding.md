@@ -1343,8 +1343,12 @@ bullet, add:
   "already registered" rule: `register(cls, as_type=None)`,
   `register_instance(obj, as_type=None)`, `register_factory(target_type, factory)`.
   `as_type` **rebinds** the key rather than adding one — one registration, one key
-  — and the subtype relation is checked statically by the generic signature, never
-  by `issubclass`, which cannot check a structural `Protocol`.
+  — and the binding is **not** checked, by anything. `as_type: type[T]` would only
+  widen `T` to the join of both arguments and accept an unrelated class (measured on
+  this project's pyright), so the annotation is a bare `type | None`; `issubclass`
+  cannot check a structural `Protocol` either, and a `Protocol` is the main reason
+  the parameter exists. A wrong binding surfaces as an `AttributeError` on the
+  resolved object.
 - `BeanDefinition.factory` decides how a bean is obtained: `None` means construct
   `cls`, non-`None` means call the factory and publish what it returns.
   `register_instance(obj)` is the factory path with a named closure returning `obj`
