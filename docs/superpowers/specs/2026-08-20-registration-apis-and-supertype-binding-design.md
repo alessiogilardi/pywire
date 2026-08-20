@@ -386,7 +386,9 @@ The last row is a consistency choice: spec 1 does not wrap exceptions raised by 
 ## Testing
 
 New file `tests/test_registration_apis.py`, plus additions to
-`tests/test_circular_dependencies.py` (cycles) and `tests/test_components.py`
+`tests/test_container_semantics.py` (cycles — that file is where every
+`CircularDependencyError` rejection lives; `tests/test_circular_dependencies.py`
+covers only cycles the container allows) and `tests/test_components.py`
 (collisions, decorators).
 
 **Identity and keys** — the factory is not called until something resolves; it is

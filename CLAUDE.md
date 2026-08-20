@@ -74,7 +74,8 @@ and behavior:
   a future fourth `_EdgeKind`, not a reachable path.
 - Two runtime rejections, both preventing a value that is not an object from
   becoming a bean: `register_instance(None)` and a coroutine function passed to
-  `register_factory`. Everything else about a binding is the type checker's job.
+  `register_factory`. Nothing else about a binding is checked at all, by the
+  container or by a type checker.
 - `container.resolve(cls)` / `container.get(cls)` (alias) lazily creates the singleton
   on first access and returns the cached instance afterward.
 
