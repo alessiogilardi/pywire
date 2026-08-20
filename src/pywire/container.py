@@ -219,29 +219,9 @@ class Container:
         resolution.stack.append((target_type, edge))
 
         try:
-            if definition.plan is None:
-                # Planned before allocating: a class that cannot be planned is
-                # never created and never published.
-                definition.plan = self._plan(target_type, requester, resolution)
-
-            # Cast because pyright resolves target_type.__new__ against the
-            # metaclass, whose overloads describe creating a *class*, not
-            # allocating an instance. The real signature is only known at
-            # runtime anyway.
-            allocate = cast(Callable[[type], object], target_type.__new__)
-            instance = allocate(target_type)
-
-            # Early publication: a dependency cycle closing through a field
-            # finds this instance instead of recursing forever.
-            definition.instance = instance
-            resolution.created.append(definition)
-
-            # Fields first, deliberately: by the time a component's __init__
-            # body runs, its injected fields are set and readable. That is a
-            # contract, and the only reason __new__ and __init__ are split.
-            self._inject_fields(instance, definition.plan, target_type, resolution)
-            kwargs = self._resolve_ctor_args(definition.plan, target_type, resolution)
-            target_type.__init__(instance, **kwargs)
+            instance = self._build_from_class(
+                target_type, definition, requester, resolution
+            )
 
             # Last, and only on the success path: this is what the
             # unsynchronised fast path in resolve() reads.
@@ -264,6 +244,40 @@ class Container:
             raise
         finally:
             resolution.stack.pop()
+
+    def _build_from_class(
+        self,
+        target_type: type,
+        definition: BeanDefinition,
+        requester: str | None,
+        resolution: _Resolution,
+    ) -> object:
+        """Allocate target_type, inject its fields, and run its __init__."""
+        if definition.plan is None:
+            # Planned before allocating: a class that cannot be planned is
+            # never created and never published.
+            definition.plan = self._plan(target_type, requester, resolution)
+
+        # Cast because pyright resolves target_type.__new__ against the
+        # metaclass, whose overloads describe creating a *class*, not
+        # allocating an instance. The real signature is only known at
+        # runtime anyway.
+        allocate = cast(Callable[[type], object], target_type.__new__)
+        instance = allocate(target_type)
+
+        # Early publication: a dependency cycle closing through a field
+        # finds this instance instead of recursing forever.
+        definition.instance = instance
+        resolution.created.append(definition)
+
+        # Fields first, deliberately: by the time a component's __init__
+        # body runs, its injected fields are set and readable. That is a
+        # contract, and the only reason __new__ and __init__ are split.
+        self._inject_fields(instance, definition.plan, target_type, resolution)
+        kwargs = self._resolve_ctor_args(definition.plan, target_type, resolution)
+        target_type.__init__(instance, **kwargs)
+
+        return instance
 
     def _plan(
         self,
