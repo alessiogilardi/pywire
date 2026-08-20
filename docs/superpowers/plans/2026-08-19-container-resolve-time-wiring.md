@@ -2902,8 +2902,15 @@ when spec 2 lands.
 
 Not in scope, noted while reviewing: `decorators._default_container` is lazily
 initialised through an unguarded module-level global, so two threads racing the very
-first `@component` could build two containers. Untouched here because `decorators.py` is
-out of scope for this plan.
+first `@component` could build two containers. Untouched by this plan because
+`decorators.py` was out of its scope.
+
+✅ **Fixed 2026-08-20**, separately from this plan. `get_default_container()` now
+double-checks under a module-level `Lock`. Regression test:
+`tests/test_components.py::test_default_container_is_created_once_under_concurrency`,
+which widens the check-then-assign window deterministically (a stub `Container` whose
+`__init__` sleeps) rather than racing for it — a bare barrier reproduced the fault only
+about one run in six, too flaky to protect anything.
 
 **`Container.clear_instances()` reentrancy corrupts the definition permanently.**
 ✅ **Fixed 2026-08-20** on `feat/container-resolve-time-wiring`. Found and demonstrated
