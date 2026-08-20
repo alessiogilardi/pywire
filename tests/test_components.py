@@ -241,3 +241,11 @@ def test_calling_the_decorator_with_no_arguments_is_an_error():
         @component()  # type: ignore[call-overload]
         class Service:
             pass
+
+
+def test_passing_a_class_and_as_type_together_is_an_error():
+    class Marker:
+        pass
+
+    with pytest.raises(TypeError, match="cannot take both"):
+        component(Marker, as_type=Marker)  # type: ignore[call-overload]

@@ -46,6 +46,17 @@ def component[T](
         TypeError: called with parentheses but without as_type.
     """
     if cls is not None:
+        if as_type is not None:
+            # The called form -- component(cls, as_type=...) -- is the only
+            # place as_type is accepted, and it is not reachable through
+            # either @overload. Silently registering cls under itself would
+            # discard as_type and register it under the wrong key -- the one
+            # silent failure this design does not tolerate anywhere else.
+            raise TypeError(
+                "component() cannot take both a class and 'as_type'. "
+                "Write @component(as_type=...) as a decorator."
+            )
+
         get_default_container().register(cls)
 
         return cls
