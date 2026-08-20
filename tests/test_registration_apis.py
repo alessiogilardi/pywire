@@ -187,3 +187,85 @@ def test_concurrent_resolution_calls_the_factory_once():
 
     assert calls == [1]
     assert len({id(result) for result in results}) == 1
+
+
+class PostgresConfig:
+    def __init__(self, host: str) -> None:
+        self.host = host
+
+
+class AppConfig:
+    def __init__(self) -> None:
+        self.postgres = PostgresConfig("db.internal")
+
+
+def test_a_pushed_instance_is_returned_by_identity():
+    container = Container()
+    config = AppConfig()
+
+    container.register_instance(config)
+
+    assert container.resolve(AppConfig) is config
+
+
+def test_the_default_key_is_the_runtime_type():
+    container = Container()
+    config = AppConfig()
+
+    container.register_instance(config.postgres)
+
+    assert container.resolve(PostgresConfig) is config.postgres
+
+
+def test_pushing_none_is_refused():
+    container = Container()
+
+    with pytest.raises(RegistrationError, match="Cannot register None"):
+        container.register_instance(None)
+
+
+def test_a_pushed_instance_survives_clear_instances_by_identity():
+    """The payoff of instance-as-factory: teardown stays uniform.
+
+    A pushed object is not reconstructible by the container, so a design that
+    dropped it on clear would leave a definition nobody can repopulate. The
+    closure makes rebuilding it mean handing back the same object.
+    """
+    container = Container()
+    config = AppConfig()
+
+    container.register_instance(config)
+
+    first = container.resolve(AppConfig)
+    container.clear_instances()
+
+    assert container.resolve(AppConfig) is first
+
+
+def test_a_pushed_instance_is_not_wired():
+    """The trap of this API, written down so it cannot surprise anyone.
+
+    The container injects only into objects it constructs. This one arrived
+    already built, so its Autowired field is simply absent.
+    """
+    container = Container()
+
+    class Dependency:
+        pass
+
+    class Service:
+        dep: Autowired[Dependency]
+
+    container.register(Dependency)
+    container.register_instance(Service())
+
+    assert not hasattr(container.resolve(Service), "dep")
+
+
+def test_pushing_over_a_taken_key_is_refused():
+    container = Container()
+
+    container.register_instance(AppConfig())
+
+    with pytest.raises(RegistrationError, match="is already registered"):
+        container.register_instance(AppConfig())

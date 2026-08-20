@@ -140,6 +140,40 @@ class Container:
             ),
         )
 
+    def register_instance[T](self, instance: T) -> None:
+        """Register an already-built object as the singleton for its own type.
+
+        For objects the container cannot build: a nested field of a loaded
+        configuration, a client constructed at the entry point. The object is
+        taken as it is -- **it is not wired**, because the container injects
+        only into instances it constructs itself.
+
+        Stored as a factory returning the object it was handed. That is what
+        makes teardown uniform: clear_instances() drops the cached instance like
+        any other, and rebuilding hands back the same object.
+
+        Raises:
+            RegistrationError: the key is already registered, or instance is
+                None.
+        """
+        if instance is None:
+            raise RegistrationError("Cannot register None as an instance.")
+
+        target_type = type(instance)
+
+        def pushed_instance() -> object:
+            """Return the object handed to register_instance."""
+            return instance
+
+        self._put(
+            target_type,
+            BeanDefinition(
+                cls=target_type,
+                factory=pushed_instance,
+                origin=_Origin.INSTANCE,
+            ),
+        )
+
     def _put(self, key: type, definition: BeanDefinition) -> None:
         """Store definition under key, refusing to displace an existing one.
 
