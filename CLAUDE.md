@@ -191,6 +191,12 @@ non-`Autowired` annotation that itself contains an unresolvable name, such as a
   module-level default container (`get_default_container()`). It takes no container
   argument by design — use `container.register(cls)` directly when an explicit container
   is needed.
+- `get_default_container()` initialises that global under a module-level `Lock`, with a
+  double check: the outer, unsynchronised test keeps the steady state free, and the inner
+  one is what stops threads racing the very first `@component` from each building their
+  own container and overwriting the winner's. That loss would be silent — `@component`
+  returns the class either way, so it would only surface later as a failed `resolve()`.
+  A plain `Lock`, not an `RLock`: nothing reachable from `Container()` calls back in.
 
 ### FastAPI integration (`fastapi.py`)
 

@@ -1,6 +1,9 @@
+import threading
+import time
+
 import pytest
 
-from pywire import Autowired, Container, RegistrationError, component
+from pywire import Autowired, Container, RegistrationError, component, decorators
 
 
 def test_simple_component_resolution():
@@ -147,3 +150,50 @@ def test_get_alias():
     instance_via_resolve = container.resolve(Service)
 
     assert instance_via_get is instance_via_resolve
+
+
+def test_default_container_is_created_once_under_concurrency(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Threads racing the very first @component must all get one container.
+
+    get_default_container() lazily initialises a module-level global. Without
+    a guard, every thread arriving before the first assignment builds its own
+    container, and all but the last are dropped -- silently taking their
+    registrations with them, since @component returns the class either way.
+
+    The window is widened deterministically rather than raced for: a bare
+    barrier reproduces this only about one run in six, which is too flaky to
+    protect anything.
+    """
+    monkeypatch.setattr(decorators, "_default_container", None)
+
+    class SlowContainer(Container):
+        def __init__(self) -> None:
+            time.sleep(0.05)
+            super().__init__()
+
+    monkeypatch.setattr(decorators, "Container", SlowContainer)
+
+    worker_count = 8
+    barrier = threading.Barrier(worker_count)
+    seen: list[Container] = []
+    seen_lock = threading.Lock()
+
+    def worker() -> None:
+        barrier.wait()
+        container = decorators.get_default_container()
+
+        with seen_lock:
+            seen.append(container)
+
+    threads = [threading.Thread(target=worker) for _ in range(worker_count)]
+
+    for thread in threads:
+        thread.start()
+
+    for thread in threads:
+        thread.join()
+
+    assert len(seen) == worker_count
+    assert len({id(container) for container in seen}) == 1
