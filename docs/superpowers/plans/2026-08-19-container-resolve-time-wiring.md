@@ -2906,8 +2906,9 @@ first `@component` could build two containers. Untouched here because `decorator
 out of scope for this plan.
 
 **`Container.clear_instances()` reentrancy corrupts the definition permanently.**
-Found and demonstrated during the final whole-branch review of this plan (not fixed —
-recorded here as a follow-up rather than reopening the branch). Repro:
+✅ **Fixed 2026-08-20** on `feat/container-resolve-time-wiring`. Found and demonstrated
+during the final whole-branch review of this plan; kept here because the reasoning is
+what justifies the guard now standing in `_create`. Original repro:
 
 ```python
 class Weird:
@@ -2929,7 +2930,18 @@ and permanently, for every future `resolve()` call on that type.
 
 Exotic trigger (nothing sane calls `clear_instances()` from inside a component's own
 `__init__`), but the symptom is the same silent-`None`-typed-as-`T` failure class this
-whole redesign exists to eliminate, so it deserves a real fix rather than staying
-undocumented. Candidate fix: guard reentrancy (`if self._current is not None: raise ...`)
-or make `_create` set `ready` only when `definition.instance is instance` (i.e. nothing
-cleared it out from under this frame) rather than unconditionally.
+whole redesign exists to eliminate, so it deserved a real fix rather than staying
+undocumented.
+
+**Fix applied:** `_create` now sets `ready` only while `definition.instance is instance`
+— i.e. only when nothing cleared the definition out from under this frame. The
+alternative candidate, rejected: guarding reentrancy in `clear_instances()`
+(`if self._current is not None: raise ...`) closes today's one known caller, whereas the
+guard in `_create` repairs the invariant where it is *established* — `ready` is True only
+if `instance` is the finished object — and so also covers any future path that empties a
+definition mid-flight, such as spec 2's `register_instance` overwriting one.
+
+The self-clearing bean is simply left uncached: the caller still receives the object its
+frame built, `ready=False`/`instance=None` stays coherent, and the next `resolve()`
+rebuilds. Regression test:
+`tests/test_container.py::test_clear_instances_from_init_never_publishes_a_ready_none`.
