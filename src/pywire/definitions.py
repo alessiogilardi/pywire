@@ -25,7 +25,10 @@ class BeanDefinition:
     """Metadata and runtime state of a registered component.
 
     Attributes:
-        cls: The registered class.
+        cls: The concrete class this definition builds. Not necessarily the
+            key it is registered under -- as_type binds a registration to a
+            supertype or Protocol -- so construction reads this, never the
+            registry key.
         factory: Callable that produces the instance, or None to construct `cls`
             the ordinary way. A pushed instance is a factory returning the object
             it was handed, which is what keeps clear_instances() and rollback
@@ -33,10 +36,15 @@ class BeanDefinition:
             pushed one yields the same object.
         origin: How the instance is obtained. Read by humans, never by the
             container.
-        instance: The singleton, once created. Published *before* __init__ runs,
-            so a dependency cycle closing through a field can find it.
-        ready: True once __init__ has returned. Because `instance` is published
-            early, it alone is not enough to hand the object out without
+        instance: The singleton, once created. On the class path it is
+            published *before* __init__ runs, so a dependency cycle closing
+            through a field can find it. On the factory path publication is
+            necessarily late: the object does not exist until the factory
+            returns. That asymmetry is why a cycle reaching a factory bean
+            can never find a partial instance, and is always rejected.
+        ready: True once the instance is complete -- __init__ returned, or the
+            factory returned. Because `instance` is published early on the
+            class path, it alone is not enough to hand the object out without
             synchronisation -- a reader could observe a half-built object.
             `ready` is what an unsynchronised read can trust. Teardown
             (_roll_back and clear_instances) clears it together with
