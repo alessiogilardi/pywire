@@ -133,7 +133,7 @@ Everything pywire raises derives from `PyWireError`:
 
 | Error | Meaning |
 |---|---|
-| `RegistrationError` | The same class was registered twice in one container |
+| `RegistrationError` | A key is already registered, `None` was pushed, or a factory is a coroutine function |
 | `UnconstructibleComponentError` | The container can never build this class — `__new__` needs arguments, a parameter cannot be supplied, or an injected field cannot be set |
 | `AnnotationResolutionError` | An `Autowired[...]` annotation names a type that cannot be resolved |
 | `DependencyResolutionError` | A dependency is not registered, or failed to build |
@@ -141,6 +141,83 @@ Everything pywire raises derives from `PyWireError`:
 
 Messages carry the resolution chain and the member that asked for the dependency, so a
 four-deep failure reads as one sentence.
+
+## Objects the container cannot build
+
+`@component` covers classes the container constructs. Configuration values,
+database engines and HTTP clients are built elsewhere — by you, at the entry
+point — so they are *pushed* into the container instead.
+
+```python
+# main.py -- the composition root, the only place the container is named
+config = AppConfig(_yaml_file=args.config)     # fails fast, here
+container = get_default_container()
+
+container.register_instance(config)            # key: AppConfig
+container.register_instance(config.postgres)   # key: PostgresConfig
+container.register_factory(Engine, lambda: create_engine(config.postgres.dsn))
+```
+
+`register_instance` publishes an object you already have; the key is its runtime
+type. `register_factory` publishes a recipe: the callable runs at most once, on
+first resolution, so nothing is built unless something asks for it.
+
+Two rules to keep in mind:
+
+- **A pushed object is not wired.** The container injects only into instances it
+  constructs. `register_instance(MyService())` returns an object whose `Autowired`
+  fields were never set.
+- **A factory runs under the container's lock**, like every `__init__`. A factory
+  that blocks on another thread's `resolve()` deadlocks, and one that does I/O
+  serializes every resolution in that container while it runs.
+
+### Depending on an abstraction
+
+`as_type=` registers a bean under a supertype or `Protocol` instead of its own
+class, so consumers never name the implementation:
+
+```python
+@repository(as_type=UserRepository)
+class PostgresUserRepo:
+    db: Autowired[PostgresConfig]
+
+@service
+class UserService:
+    repo: Autowired[UserRepository]     # does not know PostgresUserRepo exists
+```
+
+`as_type` **rebinds**: after it, `resolve(PostgresUserRepo)` fails. To have both
+keys, register twice — and know you are creating two beans.
+
+### When you do not need push
+
+A settings class that is fully determined by the environment builds itself, so it
+needs no push at all:
+
+```python
+class PostgresConfig(BaseSettings):
+    model_config = SettingsConfigDict(env_prefix="POSTGRES_")
+    host: str
+
+container.register(PostgresConfig)     # resolve() calls PostgresConfig()
+```
+
+Push is for configuration that depends on entry-point input — a CLI argument, a
+file chosen at runtime, a value already in memory.
+
+### One bean per type
+
+The registry is keyed by type, with no qualifiers. Two sub-configurations of the
+same type cannot both be registered:
+
+```python
+container.register_instance(config.primary_db)   # PostgresConfig
+container.register_instance(config.replica_db)   # RegistrationError
+```
+
+Give them distinct types in the configuration model
+(`class ReplicaDbConfig(PostgresConfig): ...`). The failure is immediate and loud —
+at startup, never a wrong bean injected quietly.
 
 ## FastAPI Integration
 

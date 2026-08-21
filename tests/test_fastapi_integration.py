@@ -1,5 +1,6 @@
 import functools
 import importlib
+from typing import Protocol
 
 import pytest
 from fastapi import APIRouter, FastAPI
@@ -472,3 +473,34 @@ def test_decoration_tolerates_an_unrelated_unresolvable_annotation() -> None:
 
     assert response.status_code == 200
     assert response.json() == {"ok": "yes"}
+
+
+def test_a_protocol_bound_dependency_resolves_in_a_route():
+    """as_type makes a route parameter's annotation a Protocol.
+
+    _wire_endpoint rewrites it to `annotation=target` plus Depends(...), and
+    FastAPI never validates the annotation of a Depends-defaulted parameter --
+    verified against this project's FastAPI before the design was written.
+    """
+    container = Container()
+
+    class Greeter(Protocol):
+        def greet(self) -> str: ...
+
+    class ItalianGreeter:
+        def greet(self) -> str:
+            return "ciao"
+
+    container.register(ItalianGreeter, as_type=Greeter)
+
+    app = FastAPI()
+    wire(app, container=container)
+
+    @app.get("/greet")
+    def greet_route(greeter: Autowired[Greeter]) -> dict[str, str]:
+        return {"greeting": greeter.greet()}
+
+    response = TestClient(app).get("/greet")
+
+    assert response.status_code == 200
+    assert response.json() == {"greeting": "ciao"}

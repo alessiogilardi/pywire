@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import inspect
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import Enum, auto
 from typing import cast
 
-from .definitions import BeanDefinition
+from .definitions import BeanDefinition, _Origin
 from .exceptions import (
     CircularDependencyError,
     DependencyResolutionError,
@@ -93,22 +94,127 @@ class Container:
         # belongs to. Safe as a single field because the lock admits one thread.
         self._current: _Resolution | None = None
 
-    def register[T](self, cls: type[T]) -> type[T]:
+    def register[T](self, cls: type[T], *, as_type: type | None = None) -> type[T]:
         """Register a class as a component.
 
         The class is neither instantiated nor modified. Both happen lazily,
         inside resolve().
-        """
-        with self._lock:
-            if cls in self._registry:
-                raise RegistrationError(
-                    f"Component '{cls.__name__}' is already registered "
-                    "in this container."
-                )
 
-            self._registry[cls] = BeanDefinition(cls=cls)
+        Args:
+            cls: The class to construct.
+            as_type: Key to register it under, instead of cls itself -- the
+                supertype or Protocol its consumers depend on. This **rebinds**:
+                afterwards cls is no longer a key of its own. A caller who wants
+                both registers twice, and knows they are creating two beans.
+
+                The relation between cls and as_type is **not checked**, here or
+                by a type checker: annotating as_type as type[T] would only make
+                T widen to the join of the two, which accepts anything.
+                issubclass() cannot check a structural Protocol either, and a
+                Protocol is the main reason this parameter exists. A wrong
+                binding surfaces as an AttributeError on the resolved object.
+        """
+        self._put(as_type if as_type is not None else cls, BeanDefinition(cls=cls))
 
         return cls
+
+    def register_factory[T](
+        self, target_type: type[T], factory: Callable[[], T]
+    ) -> None:
+        """Register a callable that builds target_type's singleton.
+
+        For objects the container cannot construct itself: third-party types
+        that need arguments, and values that must not be built unless something
+        actually asks for them.
+
+        The factory runs at most once per container, on first resolution, under
+        the same lock that guards every other construction -- so a factory that
+        waits on another thread's resolve() deadlocks, exactly as a component
+        __init__ would, and a factory that does I/O serializes every resolution
+        in this container for its duration.
+
+        Raises:
+            RegistrationError: target_type is already registered, or factory is
+                a coroutine function.
+        """
+        if inspect.iscoroutinefunction(factory):
+            # Calling it would return a coroutine object, which is not None and
+            # so passes every other check -- publishing something that is not an
+            # object at all as the bean. Knowingly partial: a callable object
+            # whose __call__ is async is not detected.
+            raise RegistrationError(
+                f"The factory for '{target_type.__name__}' is a coroutine "
+                "function: it would publish a coroutine as the bean."
+            )
+
+        self._put(
+            target_type,
+            BeanDefinition(
+                cls=target_type, factory=factory, origin=_Origin.FACTORY
+            ),
+        )
+
+    def register_instance(
+        self, instance: object, *, as_type: type | None = None
+    ) -> None:
+        """Register an already-built object as the singleton for its own type.
+
+        For objects the container cannot build: a nested field of a loaded
+        configuration, a client constructed at the entry point. The object is
+        taken as it is -- **it is not wired**, because the container injects
+        only into instances it constructs itself.
+
+        Stored as a factory returning the object it was handed. That is what
+        makes teardown uniform: clear_instances() drops the cached instance like
+        any other, and rebuilding hands back the same object.
+
+        Args:
+            instance: The already-built object to register.
+            as_type: Key to register the object under, instead of its runtime
+                type. Needed when that type is a generated subclass -- a mock, a
+                proxy -- or when consumers should depend on an abstraction. Not
+                checked against the object's own type; see register().
+
+        Raises:
+            RegistrationError: the key is already registered, or instance is
+                None.
+        """
+        if instance is None:
+            raise RegistrationError("Cannot register None as an instance.")
+
+        target_type = type(instance)
+
+        def pushed_instance() -> object:
+            """Return the object handed to register_instance."""
+            return instance
+
+        self._put(
+            as_type if as_type is not None else target_type,
+            BeanDefinition(
+                cls=target_type,
+                factory=pushed_instance,
+                origin=_Origin.INSTANCE,
+            ),
+        )
+
+    def _put(self, key: type, definition: BeanDefinition) -> None:
+        """Store definition under key, refusing to displace an existing one.
+
+        The single place the collision rule lives, for all three registration
+        APIs. A registration can only ever *add* a key -- which is what makes it
+        safe to register from inside a component's __init__ or a factory, where
+        the reentrant lock lets the call through: no definition can be emptied
+        under the frame that is building it.
+        """
+        with self._lock:
+            if key in self._registry:
+                name = getattr(key, "__name__", key)
+
+                raise RegistrationError(
+                    f"'{name}' is already registered in this container."
+                )
+
+            self._registry[key] = definition
 
     def resolve[T](self, target_type: type[T]) -> T:
         """Return the singleton associated with target_type, building it (and
@@ -197,6 +303,25 @@ class Container:
                 target_type, position, edge, requester, resolution
             )
 
+            if definition.instance is None:
+                # Unreachable today: the only bean whose instance is still None
+                # while its own frame is on the stack is one being built by a
+                # factory, and every path back into a factory frame is a
+                # constructor edge, rejected just above. Kept as an invariant
+                # check rather than a proof in prose, because the proof rests on
+                # "_EdgeKind has three values and only CTOR counts" -- whoever
+                # adds a fourth will meet this line instead of silently
+                # injecting None typed as T.
+                cycle = resolution.chain_through(target_type, start=position)
+
+                raise CircularDependencyError(
+                    f"Circular dependency through the factory for "
+                    f"'{target_type.__name__}': a factory cannot publish a "
+                    "partial instance.",
+                    chain=cycle,
+                    requester=requester,
+                )
+
             # A legal field cycle: the partner is still under construction, but
             # its identity is final, which is all a stored reference needs.
             return definition.instance
@@ -219,29 +344,14 @@ class Container:
         resolution.stack.append((target_type, edge))
 
         try:
-            if definition.plan is None:
-                # Planned before allocating: a class that cannot be planned is
-                # never created and never published.
-                definition.plan = self._plan(target_type, requester, resolution)
+            factory = definition.factory
 
-            # Cast because pyright resolves target_type.__new__ against the
-            # metaclass, whose overloads describe creating a *class*, not
-            # allocating an instance. The real signature is only known at
-            # runtime anyway.
-            allocate = cast(Callable[[type], object], target_type.__new__)
-            instance = allocate(target_type)
-
-            # Early publication: a dependency cycle closing through a field
-            # finds this instance instead of recursing forever.
-            definition.instance = instance
-            resolution.created.append(definition)
-
-            # Fields first, deliberately: by the time a component's __init__
-            # body runs, its injected fields are set and readable. That is a
-            # contract, and the only reason __new__ and __init__ are split.
-            self._inject_fields(instance, definition.plan, target_type, resolution)
-            kwargs = self._resolve_ctor_args(definition.plan, target_type, resolution)
-            target_type.__init__(instance, **kwargs)
+            if factory is None:
+                instance = self._build_from_class(definition, requester, resolution)
+            else:
+                instance = self._build_from_factory(
+                    target_type, factory, definition, requester, resolution
+                )
 
             # Last, and only on the success path: this is what the
             # unsynchronised fast path in resolve() reads.
@@ -264,6 +374,81 @@ class Container:
             raise
         finally:
             resolution.stack.pop()
+
+    def _build_from_class(
+        self,
+        definition: BeanDefinition,
+        requester: str | None,
+        resolution: _Resolution,
+    ) -> object:
+        """Allocate definition.cls, inject its fields, and run its __init__.
+
+        Built from definition.cls, not from the registry key: as_type lets a
+        registration's key (a supertype or Protocol) differ from the concrete
+        class that must actually be constructed, and definition.cls is always
+        that concrete class -- see register()'s as_type parameter.
+        """
+        target_type = definition.cls
+
+        if definition.plan is None:
+            # Planned before allocating: a class that cannot be planned is
+            # never created and never published.
+            definition.plan = self._plan(target_type, requester, resolution)
+
+        # Cast because pyright resolves target_type.__new__ against the
+        # metaclass, whose overloads describe creating a *class*, not
+        # allocating an instance. The real signature is only known at
+        # runtime anyway.
+        allocate = cast(Callable[[type], object], target_type.__new__)
+        instance = allocate(target_type)
+
+        # Early publication: a dependency cycle closing through a field
+        # finds this instance instead of recursing forever.
+        definition.instance = instance
+        resolution.created.append(definition)
+
+        # Fields first, deliberately: by the time a component's __init__
+        # body runs, its injected fields are set and readable. That is a
+        # contract, and the only reason __new__ and __init__ are split.
+        self._inject_fields(instance, definition.plan, target_type, resolution)
+        kwargs = self._resolve_ctor_args(definition.plan, target_type, resolution)
+        target_type.__init__(instance, **kwargs)
+
+        return instance
+
+    def _build_from_factory(
+        self,
+        target_type: type,
+        factory: Callable[[], object],
+        definition: BeanDefinition,
+        requester: str | None,
+        resolution: _Resolution,
+    ) -> object:
+        """Call the registered factory and publish what it returns.
+
+        Publication is necessarily *late* here: unlike the class path there is
+        no allocated object to publish before user code runs. A cycle closing
+        back on a factory bean therefore cannot find a partial instance -- which
+        is exactly why every such cycle is rejected rather than tolerated, see
+        _reject_constructor_cycle.
+        """
+        instance = factory()
+
+        if instance is None:
+            # The one value that would corrupt the ready/instance invariant
+            # into ready=True with instance=None, which the lock-free fast path
+            # cannot detect and would hand out forever.
+            raise DependencyResolutionError(
+                f"The factory registered for '{target_type.__name__}' "
+                "returned None.",
+                chain=resolution.chain(),
+                requester=requester,
+            )
+
+        definition.instance = instance
+        resolution.created.append(definition)
+
+        return instance
 
     def _plan(
         self,

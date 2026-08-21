@@ -852,8 +852,18 @@ git commit -m "✨ Add register_instance for objects the container cannot build"
 **Interfaces:**
 - Consumes: `Container._put`, `register`, `register_instance` (Tasks 2-3).
 - Produces:
-  - `Container.register[T](self, cls: type[T], *, as_type: type[T] | None = None) -> type[T]`
-  - `Container.register_instance[T](self, instance: T, *, as_type: type[T] | None = None) -> None`
+  - `Container.register[T](self, cls: type[T], *, as_type: type | None = None) -> type[T]`
+  - `Container.register_instance(self, instance: object, *, as_type: type | None = None) -> None`
+
+  `register_instance` carries **no** type parameter. It had one while `as_type` was
+  annotated `type[T]`; once that was withdrawn, `T` had a single use and pyright
+  reports `reportInvalidTypeVarUse` ("appears only once ... use object instead").
+  `register[T]` and `register_factory[T]` keep theirs — there `T` appears twice.
+
+  `as_type` is a bare `type`, not `type[T]`: `type[T]` reads as a constraint but is
+  not one - a type checker solves `T` to the join of the two arguments and accepts an
+  unrelated class (measured on this project's pyright). The bare annotation says what
+  is true.
 
   Both **rebind**: the definition is stored under `as_type` and under nothing else.
   Task 5 calls `register(cls, as_type=...)` from the decorators.
@@ -957,7 +967,7 @@ Expected: FAIL — `TypeError: register() got an unexpected keyword argument 'as
 In `src/pywire/container.py`, change `register`:
 
 ```python
-    def register[T](self, cls: type[T], *, as_type: type[T] | None = None) -> type[T]:
+    def register[T](self, cls: type[T], *, as_type: type | None = None) -> type[T]:
         """Register a class as a component.
 
         The class is neither instantiated nor modified. Both happen lazily,
@@ -969,10 +979,13 @@ In `src/pywire/container.py`, change `register`:
                 supertype or Protocol its consumers depend on. This **rebinds**:
                 afterwards cls is no longer a key of its own. A caller who wants
                 both registers twice, and knows they are creating two beans.
-                The subtype relation is checked by the type checker: `T` is
-                solved to as_type, so passing an unrelated class is a static
-                error. It is not re-checked at runtime, because issubclass()
-                cannot check a structural Protocol at all.
+
+                The relation between cls and as_type is **not checked**, here or
+                by a type checker: annotating as_type as type[T] would only make
+                T widen to the join of the two, which accepts anything.
+                issubclass() cannot check a structural Protocol either, and a
+                Protocol is the main reason this parameter exists. A wrong
+                binding surfaces as an AttributeError on the resolved object.
         """
         self._put(as_type if as_type is not None else cls, BeanDefinition(cls=cls))
 
@@ -983,8 +996,8 @@ and `register_instance` — replace its signature and its `_put` call, leaving t
 `None` guard and the named closure exactly as they are:
 
 ```python
-    def register_instance[T](
-        self, instance: T, *, as_type: type[T] | None = None
+    def register_instance(
+        self, instance: object, *, as_type: type | None = None
     ) -> None:
 ```
 
@@ -1004,7 +1017,8 @@ Add to `register_instance`'s docstring, under `Args:`:
 ```
             as_type: Key to register the object under, instead of its runtime
                 type. Needed when that type is a generated subclass -- a mock, a
-                proxy -- or when consumers should depend on an abstraction.
+                proxy -- or when consumers should depend on an abstraction. Not
+                checked against the object's own type; see register().
 ```
 
 Note `cls=target_type` stays the **concrete** type in both: the key lives in the
@@ -1329,8 +1343,12 @@ bullet, add:
   "already registered" rule: `register(cls, as_type=None)`,
   `register_instance(obj, as_type=None)`, `register_factory(target_type, factory)`.
   `as_type` **rebinds** the key rather than adding one — one registration, one key
-  — and the subtype relation is checked statically by the generic signature, never
-  by `issubclass`, which cannot check a structural `Protocol`.
+  — and the binding is **not** checked, by anything. `as_type: type[T]` would only
+  widen `T` to the join of both arguments and accept an unrelated class (measured on
+  this project's pyright), so the annotation is a bare `type | None`; `issubclass`
+  cannot check a structural `Protocol` either, and a `Protocol` is the main reason
+  the parameter exists. A wrong binding surfaces as an `AttributeError` on the
+  resolved object.
 - `BeanDefinition.factory` decides how a bean is obtained: `None` means construct
   `cls`, non-`None` means call the factory and publish what it returns.
   `register_instance(obj)` is the factory path with a named closure returning `obj`

@@ -91,6 +91,15 @@ class MixedCycleB:
     a: Autowired[MixedCycleA]
 
 
+class FactoryCycleClient:
+    """Module-level, not local to its test: with `from __future__ import
+    annotations` active, a field's Autowired[...] argument is resolved against
+    the *module*'s globals, so a class defined inside the test function body
+    could never be named by another local class's annotation."""
+
+    pass
+
+
 def test_registration_does_not_modify_the_class() -> None:
     """register() is a pure recording operation."""
     original_new = Service.__new__
@@ -376,3 +385,30 @@ def test_concurrent_resolution_is_serialised_into_one_instance() -> None:
     assert len(results) == worker_count
     assert len({id(result) for result in results}) == 1
     assert len({id(result.dep) for result in results}) == 1
+
+
+def test_a_factory_resolving_its_own_bean_is_a_cycle():
+    container = Container()
+
+    class Client:
+        pass
+
+    container.register_factory(Client, lambda: container.resolve(Client))
+
+    with pytest.raises(CircularDependencyError):
+        container.resolve(Client)
+
+
+def test_a_cycle_that_passes_through_a_factory_is_rejected():
+    container = Container()
+
+    class Service:
+        client: Autowired[FactoryCycleClient]
+
+    container.register(Service)
+    container.register_factory(
+        FactoryCycleClient, lambda: container.resolve(Service)
+    )
+
+    with pytest.raises(CircularDependencyError):
+        container.resolve(FactoryCycleClient)

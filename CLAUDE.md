@@ -49,6 +49,33 @@ and behavior:
   different containers produces two different singleton instances.
 - `container.register(cls)` stores a `BeanDefinition` (`definitions.py`) — it does
   **not** instantiate or modify the class in any way.
+- Three registration APIs share one choke point, `Container._put`, which owns the
+  "already registered" rule: `register(cls, as_type=None)`,
+  `register_instance(obj, as_type=None)`, `register_factory(target_type, factory)`.
+  `as_type` **rebinds** the key rather than adding one — one registration, one key
+  — and the binding is **not** checked, by anything. `as_type: type[T]` would only
+  widen `T` to the join of both arguments and accept an unrelated class (measured on
+  this project's pyright), so the annotation is a bare `type | None`; `issubclass`
+  cannot check a structural `Protocol` either, and a `Protocol` is the main reason
+  the parameter exists. A wrong binding surfaces as an `AttributeError` on the
+  resolved object.
+- `BeanDefinition.factory` decides how a bean is obtained: `None` means construct
+  `cls`, non-`None` means call the factory and publish what it returns.
+  `register_instance(obj)` is the factory path with a named closure returning `obj`
+  — which is why `clear_instances()` and `_roll_back` need no special case: every
+  bean is rebuildable, and rebuilding a pushed one yields the same object.
+  `BeanDefinition.origin` records which of the three it was, and is read by humans
+  only.
+- A factory publishes **late** — the object does not exist until it returns — so a
+  cycle closing on a factory bean can never find a partial instance. No new
+  mechanism handles this: a `resolve()` called from inside a factory sees a
+  non-empty stack and is a `CTOR` edge, which the existing cycle rule rejects. The
+  `instance is None` check on the legal-cycle branch is an invariant check against
+  a future fourth `_EdgeKind`, not a reachable path.
+- Two runtime rejections, both preventing a value that is not an object from
+  becoming a bean: `register_instance(None)` and a coroutine function passed to
+  `register_factory`. Nothing else about a binding is checked at all, by the
+  container or by a type checker.
 - `container.resolve(cls)` / `container.get(cls)` (alias) lazily creates the singleton
   on first access and returns the cached instance afterward.
 
@@ -190,7 +217,11 @@ non-`Autowired` annotation that itself contains an unresolvable name, such as a
   synonyms with no distinct behavior) always registers a class against a lazily-created
   module-level default container (`get_default_container()`). It takes no container
   argument by design — use `container.register(cls)` directly when an explicit container
-  is needed.
+  is needed. It is dual-form: bare (`@service`) or called with a required `as_type` keyword
+  (`@repository(as_type=UserRepository)`), which rebinds the key exactly as
+  `Container.register` does. `@component()` with empty parentheses is a `TypeError`. On this
+  path the subtype relation is *not* checked statically: preserving the decorated class's own
+  type for callers is worth more, and Python cannot express both.
 - `get_default_container()` initialises that global under a module-level `Lock`, with a
   double check: the outer, unsynchronised test keeps the steady state free, and the inner
   one is what stops threads racing the very first `@component` from each building their
@@ -282,9 +313,9 @@ covers what tests used it for.
 
 | File | Responsibility |
 |---|---|
-| `container.py` | `Container`: registry, register/resolve/get/clear_instances, `_Resolution` (call-scoped stack + undo log), construction sequence, per-subtree rollback, lock |
+| `container.py` | `Container`: registry, register/register_instance/register_factory/resolve/get/clear_instances, `_put`, `_Resolution`, `_build_from_class` and `_build_from_factory`, per-subtree rollback, lock |
 | `plans.py` | `InjectionPlan.for_class()`: pure inspection of a class's Autowired fields and constructor parameters; `field_label`/`param_label`; rejects unconstructible classes |
-| `definitions.py` | `BeanDefinition`: registration metadata, singleton slot, `ready` flag, cached `InjectionPlan` |
+| `definitions.py` | `BeanDefinition`: registration metadata, `factory`, `origin`, singleton slot, `ready` flag, cached `InjectionPlan`; `_Origin` |
 | `decorators.py` | `@component` and aliases, global container accessor |
 | `markers.py` | `Autowired[T]`, `evaluate_annotation()`, `callable_hints()`, `resolve_autowired_type()` |
 | `exceptions.py` | Immutable `PyWireError` hierarchy with `with_context()` |
