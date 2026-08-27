@@ -8,6 +8,17 @@ PyWire is a minimal Dependency Injection container for Python 3.13, inspired by 
 `@Component`/`@Autowired`. It is a small library (no runtime dependencies) living entirely
 under `src/pywire/`.
 
+## Discussion protocol
+
+For broad-scope discussions in this project — new features, architectural decisions,
+ambiguous or open-ended requirements — invoke both `superpowers:brainstorming` and
+`mattpocock-skills:grilling`: brainstorming to explore intent and design, grilling to
+stress-test the result before implementation starts.
+
+Surface every clarifying question through the `AskUserQuestion` tool, one question per
+call — wait for the answer before asking the next, never batch several questions into a
+single call.
+
 ## Commands
 
 Package management is `uv`-based (`uv.lock` present).
