@@ -222,7 +222,7 @@ non-`Autowired` annotation that itself contains an unresolvable name, such as a
   `TypeError`. On this path the subtype relation is *not* checked statically: preserving
   the decorated class's own type for callers is worth more, and Python cannot express
   both.
-- `aliases.py` binds `service`, `repository`, `agent`, and `client` to
+- `aliases.py` binds `service`, `repository`, `agent`, `client`, and `provider` to
   `component` — currently pure synonyms with no distinct behavior, kept in their own
   module so `decorators.py` stays limited to `component` itself.
 - `get_default_container()` (`container.py`) initialises that global under a
@@ -321,7 +321,7 @@ covers what tests used it for.
 | `plans.py` | `InjectionPlan.for_class()`: pure inspection of a class's Autowired fields and constructor parameters; `field_label`/`param_label`; rejects unconstructible classes |
 | `definitions.py` | `BeanDefinition`: registration metadata, `factory`, `origin`, singleton slot, `ready` flag, cached `InjectionPlan`; `_Origin` |
 | `decorators.py` | `@component` |
-| `aliases.py` | `service`, `repository`, `agent`, `client` — synonyms for `component` |
+| `aliases.py` | `service`, `repository`, `agent`, `client`, `provider` — synonyms for `component` |
 | `markers.py` | `Autowired[T]`, `evaluate_annotation()`, `callable_hints()`, `resolve_autowired_type()` |
 | `exceptions.py` | Immutable `PyWireError` hierarchy with `with_context()` |
 | `fastapi.py` | Optional FastAPI integration: `wire()`, `_install_patch`, `_wire_endpoint`, `_resolve_autowired` — resolves bare `Autowired[T]` route parameters via a global `add_api_route` patch |

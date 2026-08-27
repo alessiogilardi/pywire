@@ -1,6 +1,7 @@
 from .aliases import (
     agent,
     client,
+    provider,
     repository,
     service,
 )
@@ -29,6 +30,7 @@ __all__ = [
     "client",
     "component",
     "get_default_container",
+    "provider",
     "repository",
     "service",
 ]
