@@ -1,12 +1,11 @@
-from .container import Container
-from .decorators import (
+from .aliases import (
     agent,
     client,
-    component,
-    get_default_container,
     repository,
     service,
 )
+from .container import Container, get_default_container
+from .decorators import component
 from .exceptions import (
     AnnotationResolutionError,
     CircularDependencyError,

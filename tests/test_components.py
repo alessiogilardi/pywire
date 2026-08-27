@@ -8,10 +8,10 @@ from pywire import (
     Container,
     RegistrationError,
     component,
-    decorators,
     get_default_container,
     repository,
 )
+from pywire import container as container_module
 
 
 def test_simple_component_resolution():
@@ -174,14 +174,14 @@ def test_default_container_is_created_once_under_concurrency(
     barrier reproduces this only about one run in six, which is too flaky to
     protect anything.
     """
-    monkeypatch.setattr(decorators, "_default_container", None)
+    monkeypatch.setattr(container_module, "_default_container", None)
 
     class SlowContainer(Container):
         def __init__(self) -> None:
             time.sleep(0.05)
             super().__init__()
 
-    monkeypatch.setattr(decorators, "Container", SlowContainer)
+    monkeypatch.setattr(container_module, "Container", SlowContainer)
 
     worker_count = 8
     barrier = threading.Barrier(worker_count)
@@ -190,10 +190,10 @@ def test_default_container_is_created_once_under_concurrency(
 
     def worker() -> None:
         barrier.wait()
-        container = decorators.get_default_container()
+        resolved_container = get_default_container()
 
         with seen_lock:
-            seen.append(container)
+            seen.append(resolved_container)
 
     threads = [threading.Thread(target=worker) for _ in range(worker_count)]
 

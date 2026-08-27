@@ -211,23 +211,27 @@ non-`Autowired` annotation that itself contains an unresolvable name, such as a
 `evaluate_annotation`, and is shared by `plans.py` and `fastapi.py` — which is why
 `fastapi.py` needs no knowledge of `plans.py`.
 
-### Component decorators (`decorators.py`)
+### Component decorators (`decorators.py`, `aliases.py`)
 
-- `component` (and its aliases `service`, `repository`, `agent`, `client` — currently pure
-  synonyms with no distinct behavior) always registers a class against a lazily-created
-  module-level default container (`get_default_container()`). It takes no container
-  argument by design — use `container.register(cls)` directly when an explicit container
-  is needed. It is dual-form: bare (`@service`) or called with a required `as_type` keyword
-  (`@repository(as_type=UserRepository)`), which rebinds the key exactly as
-  `Container.register` does. `@component()` with empty parentheses is a `TypeError`. On this
-  path the subtype relation is *not* checked statically: preserving the decorated class's own
-  type for callers is worth more, and Python cannot express both.
-- `get_default_container()` initialises that global under a module-level `Lock`, with a
-  double check: the outer, unsynchronised test keeps the steady state free, and the inner
-  one is what stops threads racing the very first `@component` from each building their
-  own container and overwriting the winner's. That loss would be silent — `@component`
-  returns the class either way, so it would only surface later as a failed `resolve()`.
-  A plain `Lock`, not an `RLock`: nothing reachable from `Container()` calls back in.
+- `component` always registers a class against a lazily-created module-level default
+  container (`get_default_container()`, defined on `container.py` — see below). It takes
+  no container argument by design — use `container.register(cls)` directly when an
+  explicit container is needed. It is dual-form: bare (`@service`) or called with a
+  required `as_type` keyword (`@repository(as_type=UserRepository)`), which rebinds the
+  key exactly as `Container.register` does. `@component()` with empty parentheses is a
+  `TypeError`. On this path the subtype relation is *not* checked statically: preserving
+  the decorated class's own type for callers is worth more, and Python cannot express
+  both.
+- `aliases.py` binds `service`, `repository`, `agent`, and `client` to
+  `component` — currently pure synonyms with no distinct behavior, kept in their own
+  module so `decorators.py` stays limited to `component` itself.
+- `get_default_container()` (`container.py`) initialises that global under a
+  module-level `Lock`, with a double check: the outer, unsynchronised test keeps the
+  steady state free, and the inner one is what stops threads racing the very first
+  `@component` from each building their own container and overwriting the winner's.
+  That loss would be silent — `@component` returns the class either way, so it would
+  only surface later as a failed `resolve()`. A plain `Lock`, not an `RLock`: nothing
+  reachable from `Container()` calls back in.
 
 ### FastAPI integration (`fastapi.py`)
 
@@ -313,10 +317,11 @@ covers what tests used it for.
 
 | File | Responsibility |
 |---|---|
-| `container.py` | `Container`: registry, register/register_instance/register_factory/resolve/get/clear_instances, `_put`, `_Resolution`, `_build_from_class` and `_build_from_factory`, per-subtree rollback, lock |
+| `container.py` | `Container`: registry, register/register_instance/register_factory/resolve/get/clear_instances, `_put`, `_Resolution`, `_build_from_class` and `_build_from_factory`, per-subtree rollback, lock; `get_default_container()` and its lazily-created module-level default `Container` |
 | `plans.py` | `InjectionPlan.for_class()`: pure inspection of a class's Autowired fields and constructor parameters; `field_label`/`param_label`; rejects unconstructible classes |
 | `definitions.py` | `BeanDefinition`: registration metadata, `factory`, `origin`, singleton slot, `ready` flag, cached `InjectionPlan`; `_Origin` |
-| `decorators.py` | `@component` and aliases, global container accessor |
+| `decorators.py` | `@component` |
+| `aliases.py` | `service`, `repository`, `agent`, `client` — synonyms for `component` |
 | `markers.py` | `Autowired[T]`, `evaluate_annotation()`, `callable_hints()`, `resolve_autowired_type()` |
 | `exceptions.py` | Immutable `PyWireError` hierarchy with `with_context()` |
 | `fastapi.py` | Optional FastAPI integration: `wire()`, `_install_patch`, `_wire_endpoint`, `_resolve_autowired` — resolves bare `Autowired[T]` route parameters via a global `add_api_route` patch |
