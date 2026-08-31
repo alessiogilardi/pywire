@@ -360,7 +360,6 @@ def test_two_implementations_cannot_claim_the_same_supertype():
         container.register(OtherRepo, as_type=UserRepository)
 
 
-@pytest.mark.skip(reason="Container.close() lands in Task 3")
 def test_register_discovers_a_pre_destroy_method():
     container = Container()
     calls: list[str] = []
@@ -372,12 +371,11 @@ def test_register_discovers_a_pre_destroy_method():
 
     container.register(Resource)
     container.resolve(Resource)
-    container.close()  # type: ignore[attr-defined]
+    container.close()
 
     assert calls == ["closed"]
 
 
-@pytest.mark.skip(reason="Container.close() lands in Task 3")
 def test_register_accepts_on_close_for_a_class_without_pre_destroy():
     container = Container()
     calls: list[object] = []
@@ -387,7 +385,7 @@ def test_register_accepts_on_close_for_a_class_without_pre_destroy():
 
     container.register(Resource, on_close=lambda instance: calls.append(instance))
     instance = container.resolve(Resource)
-    container.close()  # type: ignore[attr-defined]
+    container.close()
 
     assert calls == [instance]
 
@@ -404,7 +402,6 @@ def test_register_refuses_on_close_together_with_pre_destroy():
         container.register(Resource, on_close=lambda instance: None)
 
 
-@pytest.mark.skip(reason="Container.close() lands in Task 3")
 def test_register_factory_accepts_on_close():
     container = Container()
     calls: list[object] = []
@@ -415,12 +412,11 @@ def test_register_factory_accepts_on_close():
         on_close=lambda instance: calls.append(instance),
     )
     instance = container.resolve(Engine)
-    container.close()  # type: ignore[attr-defined]
+    container.close()
 
     assert calls == [instance]
 
 
-@pytest.mark.skip(reason="Container.close() lands in Task 3")
 def test_register_instance_accepts_on_close():
     container = Container()
     calls: list[object] = []
@@ -430,7 +426,7 @@ def test_register_instance_accepts_on_close():
         engine, on_close=lambda instance: calls.append(instance)
     )
     container.resolve(Engine)
-    container.close()  # type: ignore[attr-defined]
+    container.close()
 
     assert calls == [engine]
 

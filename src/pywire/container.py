@@ -5,7 +5,7 @@ import threading
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import Enum, auto
-from typing import cast
+from typing import Any, cast
 
 from .definitions import BeanDefinition, _Origin
 from .exceptions import (
@@ -94,6 +94,12 @@ class Container:
         # inside a component's __init__ has no other way to find the stack it
         # belongs to. Safe as a single field because the lock admits one thread.
         self._current: _Resolution | None = None
+        # Order beans actually reached ready=True. Because a bean only
+        # becomes ready after every dependency it needed was itself already
+        # resolved, this order is a valid topological order by construction
+        # -- close() destroys in reverse of it with no dependency graph
+        # needed.
+        self._ready_order: list[BeanDefinition] = []
 
     def register[T](
         self,
@@ -322,6 +328,65 @@ class Container:
                 definition.ready = False
                 definition.instance = None
 
+    def close(self) -> None:
+        """Tear down every resolved bean's teardown hook, then reset.
+
+        Destroys in reverse-ready order -- dependents before their
+        dependencies, the same guarantee Spring gets from an explicit
+        dependency map, here free from _ready_order's construction. Every
+        bean is attempted regardless of earlier failures; failures are
+        aggregated and raised together, never logged-and-swallowed.
+
+        The lock is held only to snapshot which (definition, instance) pairs
+        need tearing down and to reset container state -- never across the
+        teardown calls themselves, which may do slow I/O (closing a pool) and
+        must not block an unrelated resolve() on another thread. Nothing
+        touches self._ready_order after it is captured here, so a teardown
+        that reentrantly calls resolve() only ever appends to a fresh, already
+        -cleared list.
+
+        Leaves the registry intact, exactly like clear_instances() -- there is
+        no "closed" state. A resolve() afterward simply rebuilds. A second
+        close() is a safe no-op: _ready_order is already empty.
+
+        Raises:
+            ExceptionGroup: one or more teardown callables raised. Every
+                other bean was still attempted.
+        """
+        with self._lock:
+            pending: list[tuple[Callable[[Any], None], object]] = []
+
+            for definition in reversed(self._ready_order):
+                teardown = definition.teardown
+                instance = definition.instance
+
+                if teardown is not None and instance is not None:
+                    pending.append((teardown, instance))
+
+            self._ready_order.clear()
+            self.clear_instances()
+
+        errors: list[Exception] = []
+
+        for teardown, instance in pending:
+            try:
+                teardown(instance)
+            except Exception as exc:
+                # Never BaseException: a KeyboardInterrupt mid-teardown must
+                # interrupt close() immediately, the same way it would
+                # anywhere else, rather than being trapped alongside ordinary
+                # teardown failures.
+                errors.append(exc)
+
+        if errors:
+            raise ExceptionGroup("errors during Container.close()", errors)
+
+    def __enter__(self) -> Container:
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        self.close()
+
     def _resolve(
         self,
         target_type: type,
@@ -418,6 +483,7 @@ class Container:
             # object this frame built.
             if definition.instance is instance:
                 definition.ready = True
+                self._ready_order.append(definition)
 
             return instance
         except BaseException:
