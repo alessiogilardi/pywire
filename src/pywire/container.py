@@ -642,7 +642,33 @@ class Container:
         calling a teardown hook on it would run cleanup logic against a
         half-initialized object. `ready` is read here, before the loop below
         clears it -- that read is what makes the distinction possible at all.
-        Teardown order mirrors close(): reverse of construction.
+
+        Teardown order is derived from `self._ready_order`, not from
+        `resolution.created`. `resolution.created` records *allocation-start*
+        order -- a definition is appended the moment `__new__` returns, before
+        that bean's own fields or constructor arguments are even resolved
+        (see `_build_from_class`) -- so for a nested chain such as
+        `B(Autowired[A])`, `created` reads `[..., B, A, ...]` even though A
+        finishes first and B only completes afterward. Reversing that list
+        would tear down A (the dependency) before B (its dependent), which is
+        backwards. `self._ready_order` is appended at the one point `ready`
+        is set (see `_create`), which is true completion order by
+        construction -- filtering it down to just the definitions this
+        subtree is discarding, and walking that filtered list in reverse,
+        gives correct dependents-before-dependencies order for free, with no
+        separate graph needed.
+
+        Discarded definitions are also removed from `self._ready_order` in
+        the same pass, not just cleared of `ready`/`instance`. Left in place,
+        a stale entry for a definition that rolled back here and was later
+        rebuilt successfully would accumulate a second entry in
+        `_ready_order` the next time it completes -- both entries pointing at
+        the same `BeanDefinition`, so a later `close()` would call its
+        teardown twice for what was only ever one live instance. Matching is
+        by `id(definition)`, not `==`: `BeanDefinition` is a dataclass with a
+        generated `__eq__` over all fields, and two distinct discarded
+        definitions can become field-equal to each other once cleared, which
+        would corrupt an equality-based removal.
 
         Returns:
             Every exception a teardown callable raised, so the caller can
@@ -650,13 +676,31 @@ class Container:
             rather than losing one or the other.
         """
         to_discard = resolution.created[created_mark:]
+        discard_ids = {id(definition) for definition in to_discard}
+
+        # self._ready_order is already in true completion order (see
+        # _create() and close()). Filtering it down to this subtree's
+        # discarded members -- rather than reversing resolution.created --
+        # is what gives correct dependents-before-dependencies teardown
+        # order for a nested chain.
+        completed_in_order = [
+            definition
+            for definition in self._ready_order
+            if id(definition) in discard_ids and definition.ready
+        ]
+        self._ready_order = [
+            definition
+            for definition in self._ready_order
+            if id(definition) not in discard_ids
+        ]
+
         completed: list[tuple[Callable[[Any], None], object]] = []
 
-        for definition in reversed(to_discard):
+        for definition in reversed(completed_in_order):
             teardown = definition.teardown
             instance = definition.instance
 
-            if definition.ready and teardown is not None and instance is not None:
+            if teardown is not None and instance is not None:
                 completed.append((teardown, instance))
 
         for definition in to_discard:

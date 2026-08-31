@@ -148,6 +148,42 @@ class RollbackHost3:
     failing: Autowired[RollbackFailing3]
 
 
+class NestedRollbackA:
+    pass
+
+
+class NestedRollbackB:
+    # A field so B's own resolution allocates and fully completes A before B
+    # itself reaches ready=True.
+    a: Autowired[NestedRollbackA]
+
+
+class NestedRollbackFailing:
+    def __init__(self) -> None:
+        raise RuntimeError("boom")
+
+
+class NestedRollbackHost:
+    # Declaration order matters: plans.py preserves it, so the B->A chain
+    # fully completes before NestedRollbackFailing raises.
+    x: Autowired[NestedRollbackB]
+    y: Autowired[NestedRollbackFailing]
+
+
+class DupTeardownDep:
+    pass
+
+
+class DupTeardownFailing:
+    def __init__(self) -> None:
+        raise RuntimeError("boom")
+
+
+class DupTeardownHost:
+    dep: Autowired[DupTeardownDep]
+    failing: Autowired[DupTeardownFailing]
+
+
 def test_registration_does_not_modify_the_class() -> None:
     """register() is a pure recording operation."""
     original_new = Service.__new__
@@ -528,3 +564,61 @@ def test_rollback_uses_base_exception_group_for_a_non_exception_original_failure
     exceptions = exc_info.value.exceptions
     assert any(isinstance(exc, KeyboardInterrupt) for exc in exceptions)
     assert any(isinstance(exc, ValueError) for exc in exceptions)
+
+
+def test_rollback_tears_down_dependent_before_its_own_dependency():
+    """resolution.created records allocation-start order, which for a nested
+    chain B(Autowired[A]) is [..., B, A, ...] -- B is allocated first and
+    starts resolving its field, which allocates and fully completes A,
+    before B's own __init__ runs and B itself completes.
+
+    Teardown order must still be completion order reversed (B before A, the
+    dependent before its dependency), which is what self._ready_order -- and
+    not resolution.created -- gives filtered down to this subtree.
+    """
+    container = Container()
+    closed: list[str] = []
+
+    container.register(
+        NestedRollbackA, on_close=lambda instance: closed.append("A")
+    )
+    container.register(
+        NestedRollbackB, on_close=lambda instance: closed.append("B")
+    )
+    container.register(NestedRollbackFailing)
+    container.register(NestedRollbackHost)
+
+    with pytest.raises(RuntimeError, match="boom"):
+        container.resolve(NestedRollbackHost)
+
+    assert closed == ["B", "A"]
+
+
+def test_rolled_back_bean_rebuilt_and_closed_tears_down_exactly_once():
+    """A bean that reaches ready=True inside a subtree that later rolls back
+    gets torn down and removed from self._ready_order by _roll_back. If the
+    stale entry survived, resolving the same type again and then closing
+    would append a second entry for the same BeanDefinition, and close()
+    would fire its teardown twice for what was only ever one live instance
+    at close time.
+    """
+    container = Container()
+    closed: list[str] = []
+
+    container.register(
+        DupTeardownDep, on_close=lambda instance: closed.append("dep")
+    )
+    container.register(DupTeardownFailing)
+    container.register(DupTeardownHost)
+
+    with pytest.raises(RuntimeError, match="boom"):
+        container.resolve(DupTeardownHost)
+
+    assert closed == ["dep"]
+
+    # DupTeardownDep was rolled back, not deregistered -- it can be resolved
+    # again on its own, independent of the permanently-broken Host.
+    container.resolve(DupTeardownDep)
+    container.close()
+
+    assert closed == ["dep", "dep"]
