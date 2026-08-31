@@ -219,6 +219,60 @@ Give them distinct types in the configuration model
 (`class ReplicaDbConfig(PostgresConfig): ...`). The failure is immediate and loud —
 at startup, never a wrong bean injected quietly.
 
+## Tearing beans down
+
+A bean that owns an external resource -- a connection pool, a file handle -- needs
+to release it when the container's work is done. Two ways to declare how, matching
+the two ways a bean gets built:
+
+```python
+from pywire import Container, pre_destroy
+
+@service
+class Cache:
+    @pre_destroy
+    def shutdown(self) -> None:
+        self._connection.close()
+```
+
+For a third-party class you cannot decorate, declare it at the registration call
+instead:
+
+```python
+container.register_factory(
+    Engine,
+    lambda: create_engine(config.postgres.dsn),
+    on_close=lambda engine: engine.dispose(),
+)
+```
+
+The two are mutually exclusive for the same bean -- registering `on_close=` for a
+class that already has a `@pre_destroy` method is a `RegistrationError`, not a
+silent override.
+
+`Container.close()` -- or the equivalent `with Container() as container:` -- tears
+every resolved bean down in reverse of the order it was built, so a bean's
+dependents are always closed before the bean itself. Every teardown is attempted
+regardless of earlier failures; if any raised, `close()` raises them together as an
+`ExceptionGroup` once every bean has been tried.
+
+```python
+with Container() as container:
+    container.register_factory(Engine, lambda: create_engine(dsn), on_close=lambda e: e.dispose())
+    container.register(GoldenSetLabelingService)
+
+    container.resolve(GoldenSetLabelingService)(run_id)
+# engine disposed here, deterministically, even if the block raised
+```
+
+A bean without `@pre_destroy` or `on_close` simply has no teardown -- there is no
+fallback that guesses at a `close()`/`__exit__` method on your behalf. `close()`
+leaves the container's registrations intact, so it is safe to call more than once,
+and a `resolve()` afterward just rebuilds -- there is no "closed" state to trip
+over. Nothing is torn down automatically: the default container (what `@component`
+writes into) is closed explicitly, with `get_default_container().close()`, never at
+process exit.
+
 ## FastAPI Integration
 
 PyWire ships an optional FastAPI integration that lets route handlers declare their

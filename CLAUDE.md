@@ -244,6 +244,71 @@ non-`Autowired` annotation that itself contains an unresolvable name, such as a
   only surface later as a failed `resolve()`. A plain `Lock`, not an `RLock`: nothing
   reachable from `Container()` calls back in.
 
+### Lifecycle teardown (`lifecycle.py`, `Container.close()`)
+
+Two declaration surfaces, normalized at registration time into one
+`BeanDefinition.teardown: Callable[[Any], None] | None` -- `Container` never branches
+on which one a bean used. `@pre_destroy` marks an instance method (pure tag, no
+wrapping) for a class you own; `find_pre_destroy()` walks the MRO most-derived first,
+and a `seen` set ensures only the first (most derived) definition of a given method
+name is ever inspected -- a subclass that overrides the method without re-decorating
+it is that first definition, is unmarked, and the base's marked version is never
+reached, opting the class out. Same rule already documented for `Autowired` fields on
+a base class.
+`on_close=` on `register`/`register_factory`/`register_instance` covers everything
+else; the two are mutually exclusive for the same bean, rejected eagerly by
+`resolve_teardown()` at registration, never resolved with a silent precedence rule.
+Both a `@pre_destroy` method's signature and an `on_close` callable's are validated
+eagerly too -- must accept the torn-down instance as their only required argument --
+though `on_close` tolerates a callable `inspect.signature()` cannot introspect
+(a lambda is always readable; a C-implemented callable might not be), falling back to
+"assumed fine, let the call speak for itself", the same posture `plans.py` already
+takes for an uninspectable `__new__`.
+
+`Container._ready_order` needs no dependency graph: because a bean only reaches
+`ready=True` after every dependency it needed was itself already resolved, the order
+beans become ready *is* a valid topological order by construction. `close()`
+destroys in reverse of it -- dependents before dependencies -- attempting every bean
+regardless of earlier failures and aggregating what fails into one `ExceptionGroup`,
+never logged-and-swallowed. Its lock is held only to capture `(definition, instance)`
+pairs and reset container state; the teardown calls themselves run outside it, so a
+slow teardown (a pool doing blocking I/O to shut down) cannot stall an unrelated
+`resolve()` on another thread, and a teardown that reentrantly calls `resolve()` only
+ever appends to a fresh, already-cleared `_ready_order`. `close()` leaves the registry
+intact, exactly like `clear_instances()` -- there is no "closed" state, a `resolve()`
+afterward simply rebuilds, and a second `close()` is a no-op.
+
+`_roll_back` gets the identical treatment for a `resolve()` subtree discarded mid-
+construction, with one filter `close()` does not need: only a definition that reached
+`ready=True` *before* the failure is torn down. The bean whose own construction is
+failing is always present in the same discarded slice -- its instance was published
+early, before `__init__` ran -- but it never reached `ready=True`, so it is excluded
+rather than handed a teardown hook expecting a fully-built object. Its order and
+membership are derived from `self._ready_order` -- filtered down to the definitions
+this subtree is discarding (matched by `id()`, not `==`, since two cleared
+`BeanDefinition`s can become field-equal to each other) and removed from
+`_ready_order` in that same pass -- rather than from `resolution.created`:
+`resolution.created` records allocation-*start* order, appended the moment
+`__new__` returns and before that bean's own dependencies are resolved, so for a
+nested chain it is not completion order. `self._ready_order` is appended at the one
+point `ready` is set, which *is* true completion order by construction, and reversing
+the filtered list gives correct dependents-before-dependencies teardown order with no
+separate graph needed; removing the matched entries from `_ready_order` in the same
+pass is also what stops a bean that rolls back here and is later rebuilt successfully
+from accumulating a second `_ready_order` entry that would fire its teardown twice on
+a future `close()`. `_create`'s except clause combines -- never replaces -- the
+exception that triggered the rollback with whatever `_roll_back`'s own teardown
+attempts raised, picking `ExceptionGroup` or `BaseExceptionGroup` by whether the
+triggering exception is itself an `Exception`: `_roll_back` runs even for a bare
+`BaseException` like `KeyboardInterrupt`, which `ExceptionGroup` cannot hold.
+
+No `atexit` hook and no duck-typing fallback (auto-detecting `close()`/`__exit__` on
+an undeclared bean): a bean without either declaration simply has no teardown. No
+runtime check ties `on_close`'s declared argument type to what actually gets resolved
+-- the same trust boundary already accepted for `as_type`, `Callable[[Any], None]`
+being the honest annotation once stored on `BeanDefinition`, same reasoning as
+`as_type: type | None` being bare instead of `type[T]`.
+
 ### FastAPI integration (`fastapi.py`)
 
 Optional module (requires the `fastapi` extra, `uv pip install -e ".[fastapi]"`) that lets route
@@ -328,13 +393,14 @@ covers what tests used it for.
 
 | File | Responsibility |
 |---|---|
-| `container.py` | `Container`: registry, register/register_instance/register_factory/resolve/get/clear_instances, `_put`, `_Resolution`, `_build_from_class` and `_build_from_factory`, per-subtree rollback, lock; `get_default_container()` and its lazily-created module-level default `Container` |
+| `container.py` | `Container`: registry, register/register_instance/register_factory/resolve/get/clear_instances/close, `_put`, `_Resolution`, `_build_from_class` and `_build_from_factory`, per-subtree rollback with teardown, `_ready_order`, lock |
 | `plans.py` | `InjectionPlan.for_class()`: pure inspection of a class's Autowired fields and constructor parameters; `field_label`/`param_label`; rejects unconstructible classes |
-| `definitions.py` | `BeanDefinition`: registration metadata, `factory`, `origin`, singleton slot, `ready` flag, cached `InjectionPlan`; `_Origin` |
+| `definitions.py` | `BeanDefinition`: registration metadata, `factory`, `origin`, `teardown`, singleton slot, `ready` flag, cached `InjectionPlan`; `_Origin` |
 | `decorators.py` | `@component` |
 | `aliases.py` | `service`, `repository`, `agent`, `client`, `provider` — synonyms for `component` |
 | `markers.py` | `Autowired[T]`, `evaluate_annotation()`, `callable_hints()`, `resolve_autowired_type()` |
 | `exceptions.py` | Immutable `PyWireError` hierarchy with `with_context()` |
+| `lifecycle.py` | `pre_destroy` marker decorator; `find_pre_destroy` (pure MRO-respecting discovery); `resolve_teardown` (reconciles `@pre_destroy` with `on_close`) |
 | `fastapi.py` | Optional FastAPI integration: `wire()`, `_install_patch`, `_wire_endpoint`, `_resolve_autowired` — resolves bare `Autowired[T]` route parameters via a global `add_api_route` patch |
 
 ## Conventions to preserve
