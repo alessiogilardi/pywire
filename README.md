@@ -33,6 +33,8 @@ class DBClient:
   containers yields two independent singletons
 - Typed exception hierarchy rooted at PyWireError
 - Optional FastAPI integration (`pywire.fastapi.wire`) for bare `Autowired[T]` route parameters
+- Lifecycle teardown via `@pre_destroy` or `on_close=`, run by `Container.close()` in
+  reverse build order
 
 ## Installation
 
@@ -360,10 +362,12 @@ pywire/
 ├── plans.py           # InjectionPlan: what a class needs
 ├── definitions.py     # BeanDefinition metadata
 ├── decorators.py      # @component decorator
+├── aliases.py         # service/repository/agent/client/provider — synonyms for @component
 ├── exceptions.py      # Exception hierarchy
 ├── markers.py         # Autowired[T] marker and annotation evaluation
+├── lifecycle.py       # @pre_destroy marker and teardown resolution
 ├── fastapi.py         # Optional FastAPI integration (wire())
-└── __init__.py        # Public API
+└── __init__.py         # Public API
 ```
 
 ## Testing
