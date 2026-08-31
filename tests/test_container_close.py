@@ -145,6 +145,24 @@ def test_context_manager_closes_even_when_the_body_raises():
     assert calls == ["closed"]
 
 
+def test_clear_instances_then_rebuild_then_close_tears_down_exactly_once():
+    container = Container()
+    calls: list[str] = []
+
+    class Resource:
+        pass
+
+    container.register(Resource, on_close=lambda instance: calls.append("closed"))
+    container.resolve(Resource)
+
+    container.clear_instances()
+    container.resolve(Resource)
+
+    container.close()
+
+    assert calls == ["closed"]
+
+
 def test_a_pushed_instance_with_on_close_is_lazy_like_every_other_bean():
     container = Container()
     calls: list[str] = []

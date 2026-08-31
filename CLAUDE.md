@@ -393,7 +393,7 @@ covers what tests used it for.
 
 | File | Responsibility |
 |---|---|
-| `container.py` | `Container`: registry, register/register_instance/register_factory/resolve/get/clear_instances/close, `_put`, `_Resolution`, `_build_from_class` and `_build_from_factory`, per-subtree rollback with teardown, `_ready_order`, lock |
+| `container.py` | `Container`: registry, register/register_instance/register_factory/resolve/get/clear_instances/close, `_put`, `_Resolution`, `_build_from_class` and `_build_from_factory`, per-subtree rollback with teardown, `_ready_order`, lock; `get_default_container()` and its lazily-created module-level default `Container` |
 | `plans.py` | `InjectionPlan.for_class()`: pure inspection of a class's Autowired fields and constructor parameters; `field_label`/`param_label`; rejects unconstructible classes |
 | `definitions.py` | `BeanDefinition`: registration metadata, `factory`, `origin`, `teardown`, singleton slot, `ready` flag, cached `InjectionPlan`; `_Origin` |
 | `decorators.py` | `@component` |
@@ -406,5 +406,5 @@ covers what tests used it for.
 ## Conventions to preserve
 
 - All docstrings, comments, and error/exception messages are written in English only.
-- `ruff` config (`pyproject.toml`) enables `E, F, I, UP, RUF` rule sets, target `py313`,
+- `ruff` config (`pyproject.toml`) enables `E, F, I, UP, RUF, ANN401` rule sets, target `py313`,
   line length 88, first-party import group `pywire`.

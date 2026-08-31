@@ -229,6 +229,12 @@ class Container:
                 like every other bean: never resolved means never torn down by
                 close(), even though the object already exists.
 
+                Single-shot with respect to close(): the pushed object is
+                handed back as-is on every resolve, so "rebuilding" after a
+                close() returns the identical, already-torn-down object, not a
+                fresh one. Closing, re-resolving, and closing again re-runs
+                the teardown on that same object a second time.
+
         Raises:
             RegistrationError: the key is already registered, instance is
                 None, type(instance) has both a @pre_destroy method and
@@ -317,6 +323,13 @@ class Container:
         default container -- which @component writes into and nothing else ever
         resets -- and for any caller that wants a fresh object graph without
         rebuilding the registry.
+
+        Drops every teardown-eligible entry too: nothing is cached any more, so
+        nothing is currently eligible for close()'s teardown pass. Left in
+        place, a stale _ready_order entry would become a duplicate the next
+        time the same definition completes -- close() would then fire that
+        bean's teardown once per entry against the one live instance, exactly
+        the failure _roll_back was fixed to avoid for a rolled-back subtree.
         """
         with self._lock:
             for definition in self._registry.values():
@@ -327,6 +340,8 @@ class Container:
                 # ready=True with instance already gone.
                 definition.ready = False
                 definition.instance = None
+
+            self._ready_order.clear()
 
     def close(self) -> None:
         """Tear down every resolved bean's teardown hook, then reset.
@@ -669,6 +684,16 @@ class Container:
         generated `__eq__` over all fields, and two distinct discarded
         definitions can become field-equal to each other once cleared, which
         would corrupt an equality-based removal.
+
+        Teardown order mirrors close() -- dependents before their
+        dependencies -- but NOT close()'s lock-release discipline. close()
+        deliberately releases the lock before running teardown callables, so
+        slow teardown I/O cannot block a concurrent resolve(). This method is
+        called synchronously from _create(), itself already running inside
+        resolve()'s locked section, so its teardown calls run with the
+        container lock held: a rollback teardown that does blocking I/O
+        stalls every other thread's resolve() for its duration, the same as
+        any other work inside a resolution already does.
 
         Returns:
             Every exception a teardown callable raised, so the caller can

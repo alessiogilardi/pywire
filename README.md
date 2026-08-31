@@ -226,7 +226,7 @@ to release it when the container's work is done. Two ways to declare how, matchi
 the two ways a bean gets built:
 
 ```python
-from pywire import Container, pre_destroy
+from pywire import pre_destroy, service
 
 @service
 class Cache:
@@ -272,6 +272,12 @@ and a `resolve()` afterward just rebuilds -- there is no "closed" state to trip
 over. Nothing is torn down automatically: the default container (what `@component`
 writes into) is closed explicitly, with `get_default_container().close()`, never at
 process exit.
+
+A bean registered with `register_instance()` is the one exception to "just
+rebuilds": a pushed instance is stored as a factory that always returns the same
+object, so after `close()` tears it down, `resolve()` hands back that identical,
+already-torn-down object rather than a fresh one -- and closing again afterward
+re-runs its teardown against that same, already-closed object.
 
 ## FastAPI Integration
 
