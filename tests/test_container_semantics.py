@@ -100,6 +100,54 @@ class FactoryCycleClient:
     pass
 
 
+class RollbackDep:
+    """Module-level for the same reason as FactoryCycleClient: RollbackHost's
+    `Autowired[RollbackDep]` field annotation is resolved against module
+    globals, which a function-local class would not be part of."""
+
+    pass
+
+
+class RollbackFailing:
+    def __init__(self) -> None:
+        raise RuntimeError("boom")
+
+
+class RollbackHost:
+    # Declaration order matters: plans.py preserves it, so RollbackDep always
+    # finishes (reaches ready=True) before RollbackFailing raises.
+    dep: Autowired[RollbackDep]
+    failing: Autowired[RollbackFailing]
+
+
+class RollbackDep2:
+    pass
+
+
+class RollbackFailing2:
+    def __init__(self) -> None:
+        raise RuntimeError("boom")
+
+
+class RollbackHost2:
+    dep: Autowired[RollbackDep2]
+    failing: Autowired[RollbackFailing2]
+
+
+class RollbackDep3:
+    pass
+
+
+class RollbackFailing3:
+    def __init__(self) -> None:
+        raise KeyboardInterrupt
+
+
+class RollbackHost3:
+    dep: Autowired[RollbackDep3]
+    failing: Autowired[RollbackFailing3]
+
+
 def test_registration_does_not_modify_the_class() -> None:
     """register() is a pure recording operation."""
     original_new = Service.__new__
@@ -412,3 +460,71 @@ def test_a_cycle_that_passes_through_a_factory_is_rejected():
 
     with pytest.raises(CircularDependencyError):
         container.resolve(FactoryCycleClient)
+
+
+def test_rollback_never_calls_teardown_on_the_bean_that_is_failing():
+    container = Container()
+    closed: list[str] = []
+
+    class Failing:
+        def __init__(self) -> None:
+            raise RuntimeError("boom")
+
+    container.register(Failing, on_close=lambda instance: closed.append("failing"))
+
+    with pytest.raises(RuntimeError, match="boom"):
+        container.resolve(Failing)
+
+    assert closed == []
+
+
+def test_rollback_tears_down_a_completed_sibling_but_not_the_failing_bean():
+    container = Container()
+    closed: list[str] = []
+
+    container.register(
+        RollbackDep, on_close=lambda instance: closed.append("dep")
+    )
+    container.register(RollbackFailing)
+    container.register(RollbackHost)
+
+    with pytest.raises(RuntimeError, match="boom"):
+        container.resolve(RollbackHost)
+
+    assert closed == ["dep"]
+
+
+def test_rollback_combines_original_and_teardown_failures_into_an_exception_group():
+    container = Container()
+
+    def fail_close(instance: object) -> None:
+        raise ValueError("teardown also failed")
+
+    container.register(RollbackDep2, on_close=fail_close)
+    container.register(RollbackFailing2)
+    container.register(RollbackHost2)
+
+    with pytest.raises(ExceptionGroup) as exc_info:
+        container.resolve(RollbackHost2)
+
+    exceptions = exc_info.value.exceptions
+    assert any(isinstance(exc, RuntimeError) for exc in exceptions)
+    assert any(isinstance(exc, ValueError) for exc in exceptions)
+
+
+def test_rollback_uses_base_exception_group_for_a_non_exception_original_failure():
+    container = Container()
+
+    def fail_close(instance: object) -> None:
+        raise ValueError("teardown also failed")
+
+    container.register(RollbackDep3, on_close=fail_close)
+    container.register(RollbackFailing3)
+    container.register(RollbackHost3)
+
+    with pytest.raises(BaseExceptionGroup) as exc_info:
+        container.resolve(RollbackHost3)
+
+    exceptions = exc_info.value.exceptions
+    assert any(isinstance(exc, KeyboardInterrupt) for exc in exceptions)
+    assert any(isinstance(exc, ValueError) for exc in exceptions)

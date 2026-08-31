@@ -486,8 +486,30 @@ class Container:
                 self._ready_order.append(definition)
 
             return instance
-        except BaseException:
-            self._roll_back(resolution, created_mark)
+        except BaseException as exc:
+            teardown_errors = self._roll_back(resolution, created_mark)
+
+            if teardown_errors:
+                # exc may be a bare BaseException (KeyboardInterrupt,
+                # SystemExit) -- ExceptionGroup accepts only Exception
+                # members, so the group type is picked to match what exc
+                # actually is. Split into two branches, rather than a
+                # group_type variable, so pyright narrows exc's type for the
+                # ExceptionGroup call from the isinstance check directly.
+                message = (
+                    f"'{target_type.__name__}' failed to construct, and "
+                    "rollback teardown also raised"
+                )
+
+                if isinstance(exc, Exception):
+                    raise ExceptionGroup(
+                        message, [exc, *teardown_errors]
+                    ) from exc
+
+                raise BaseExceptionGroup(
+                    message, [exc, *teardown_errors]
+                ) from exc
+
             raise
         finally:
             resolution.stack.pop()
@@ -587,7 +609,9 @@ class Container:
                 chain=resolution.chain(), requester=requester
             ) from error
 
-    def _roll_back(self, resolution: _Resolution, created_mark: int) -> None:
+    def _roll_back(
+        self, resolution: _Resolution, created_mark: int
+    ) -> list[Exception]:
         """Discard every instance built inside the failing subtree.
 
         Clearing only the failing bean is not enough: a partner already
@@ -609,12 +633,47 @@ class Container:
         instance as ready, since the two stores remain independent and
         non-atomic. `plan` is deliberately preserved: it is a pure function of
         the class, and a construction failure says nothing about its validity.
+
+        Teardown is attempted for every discarded definition that reached
+        `ready=True` before the failure -- a genuinely complete sibling built
+        earlier in the same subtree. The bean whose own construction is
+        failing right now is *never* torn down: its instance was published
+        early (before __init__ ran) but it never reached ready=True, so
+        calling a teardown hook on it would run cleanup logic against a
+        half-initialized object. `ready` is read here, before the loop below
+        clears it -- that read is what makes the distinction possible at all.
+        Teardown order mirrors close(): reverse of construction.
+
+        Returns:
+            Every exception a teardown callable raised, so the caller can
+            combine them with the exception that triggered the rollback
+            rather than losing one or the other.
         """
-        for definition in resolution.created[created_mark:]:
+        to_discard = resolution.created[created_mark:]
+        completed: list[tuple[Callable[[Any], None], object]] = []
+
+        for definition in reversed(to_discard):
+            teardown = definition.teardown
+            instance = definition.instance
+
+            if definition.ready and teardown is not None and instance is not None:
+                completed.append((teardown, instance))
+
+        for definition in to_discard:
             definition.ready = False
             definition.instance = None
 
         del resolution.created[created_mark:]
+
+        errors: list[Exception] = []
+
+        for teardown, instance in completed:
+            try:
+                teardown(instance)
+            except Exception as exc:
+                errors.append(exc)
+
+        return errors
 
     def _inject_fields(
         self,
