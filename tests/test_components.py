@@ -9,6 +9,7 @@ from pywire import (
     RegistrationError,
     component,
     get_default_container,
+    pre_destroy,
     repository,
 )
 from pywire import container as container_module
@@ -249,3 +250,21 @@ def test_passing_a_class_and_as_type_together_is_an_error():
 
     with pytest.raises(TypeError, match="cannot take both"):
         component(Marker, as_type=Marker)  # type: ignore[call-overload]
+
+
+@pytest.mark.skip(reason="Container.close() lands in Task 3")
+def test_component_class_teardown_runs_via_the_default_container():
+    """The requirement this whole feature exists for: teardown must work with
+    nothing but @component -- no explicit Container.register call anywhere."""
+    calls: list[str] = []
+
+    @component
+    class Resource:
+        @pre_destroy
+        def shutdown(self) -> None:
+            calls.append("closed")
+
+    get_default_container().resolve(Resource)
+    get_default_container().close()  # type: ignore[attr-defined]
+
+    assert calls == ["closed"]

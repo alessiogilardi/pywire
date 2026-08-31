@@ -15,6 +15,7 @@ from .exceptions import (
     RegistrationError,
     UnconstructibleComponentError,
 )
+from .lifecycle import resolve_teardown
 from .plans import InjectionPlan, field_label, param_label
 
 type Registry = dict[type, BeanDefinition]
@@ -94,7 +95,13 @@ class Container:
         # belongs to. Safe as a single field because the lock admits one thread.
         self._current: _Resolution | None = None
 
-    def register[T](self, cls: type[T], *, as_type: type | None = None) -> type[T]:
+    def register[T](
+        self,
+        cls: type[T],
+        *,
+        as_type: type | None = None,
+        on_close: Callable[[T], None] | None = None,
+    ) -> type[T]:
         """Register a class as a component.
 
         The class is neither instantiated nor modified. Both happen lazily,
@@ -113,13 +120,32 @@ class Container:
                 issubclass() cannot check a structural Protocol either, and a
                 Protocol is the main reason this parameter exists. A wrong
                 binding surfaces as an AttributeError on the resolved object.
+            on_close: Called with the finished instance during Container.close()
+                or a rollback that discards it after completion. Mutually
+                exclusive with a @pre_destroy method on cls -- same unchecked
+                relation to T as as_type has to cls.
+
+        Raises:
+            RegistrationError: as_type is already registered, cls has both a
+                @pre_destroy method and on_close, or on_close is unusable as a
+                teardown hook (a coroutine function, or a signature that needs
+                more than the instance argument).
         """
-        self._put(as_type if as_type is not None else cls, BeanDefinition(cls=cls))
+        teardown = resolve_teardown(cls, on_close)
+
+        self._put(
+            as_type if as_type is not None else cls,
+            BeanDefinition(cls=cls, teardown=teardown),
+        )
 
         return cls
 
     def register_factory[T](
-        self, target_type: type[T], factory: Callable[[], T]
+        self,
+        target_type: type[T],
+        factory: Callable[[], T],
+        *,
+        on_close: Callable[[T], None] | None = None,
     ) -> None:
         """Register a callable that builds target_type's singleton.
 
@@ -133,9 +159,18 @@ class Container:
         __init__ would, and a factory that does I/O serializes every resolution
         in this container for its duration.
 
+        Args:
+            target_type: The key -- and the type find_pre_destroy() inspects
+                for a @pre_destroy method, since the factory itself is opaque
+                until called.
+            factory: Builds the singleton on first resolution.
+            on_close: See register(). Mutually exclusive with a @pre_destroy
+                method on target_type.
+
         Raises:
-            RegistrationError: target_type is already registered, or factory is
-                a coroutine function.
+            RegistrationError: target_type is already registered, factory is a
+                coroutine function, target_type has both a @pre_destroy method
+                and on_close, or on_close is unusable as a teardown hook.
         """
         if inspect.iscoroutinefunction(factory):
             # Calling it would return a coroutine object, which is not None and
@@ -147,15 +182,24 @@ class Container:
                 "function: it would publish a coroutine as the bean."
             )
 
+        teardown = resolve_teardown(target_type, on_close)
+
         self._put(
             target_type,
             BeanDefinition(
-                cls=target_type, factory=factory, origin=_Origin.FACTORY
+                cls=target_type,
+                factory=factory,
+                origin=_Origin.FACTORY,
+                teardown=teardown,
             ),
         )
 
     def register_instance(
-        self, instance: object, *, as_type: type | None = None
+        self,
+        instance: object,
+        *,
+        as_type: type | None = None,
+        on_close: Callable[[object], None] | None = None,
     ) -> None:
         """Register an already-built object as the singleton for its own type.
 
@@ -174,15 +218,21 @@ class Container:
                 type. Needed when that type is a generated subclass -- a mock, a
                 proxy -- or when consumers should depend on an abstraction. Not
                 checked against the object's own type; see register().
+            on_close: See register(). find_pre_destroy() inspects
+                type(instance) -- the runtime type -- not as_type. Stays lazy
+                like every other bean: never resolved means never torn down by
+                close(), even though the object already exists.
 
         Raises:
-            RegistrationError: the key is already registered, or instance is
-                None.
+            RegistrationError: the key is already registered, instance is
+                None, type(instance) has both a @pre_destroy method and
+                on_close, or on_close is unusable as a teardown hook.
         """
         if instance is None:
             raise RegistrationError("Cannot register None as an instance.")
 
         target_type = type(instance)
+        teardown = resolve_teardown(target_type, on_close)
 
         def pushed_instance() -> object:
             """Return the object handed to register_instance."""
@@ -194,6 +244,7 @@ class Container:
                 cls=target_type,
                 factory=pushed_instance,
                 origin=_Origin.INSTANCE,
+                teardown=teardown,
             ),
         )
 

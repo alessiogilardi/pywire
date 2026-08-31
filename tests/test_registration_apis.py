@@ -9,7 +9,13 @@ from typing import Protocol
 
 import pytest
 
-from pywire import Autowired, Container, DependencyResolutionError, RegistrationError
+from pywire import (
+    Autowired,
+    Container,
+    DependencyResolutionError,
+    RegistrationError,
+    pre_destroy,
+)
 
 
 class Engine:
@@ -352,3 +358,93 @@ def test_two_implementations_cannot_claim_the_same_supertype():
 
     with pytest.raises(RegistrationError, match="is already registered"):
         container.register(OtherRepo, as_type=UserRepository)
+
+
+@pytest.mark.skip(reason="Container.close() lands in Task 3")
+def test_register_discovers_a_pre_destroy_method():
+    container = Container()
+    calls: list[str] = []
+
+    class Resource:
+        @pre_destroy
+        def shutdown(self) -> None:
+            calls.append("closed")
+
+    container.register(Resource)
+    container.resolve(Resource)
+    container.close()  # type: ignore[attr-defined]
+
+    assert calls == ["closed"]
+
+
+@pytest.mark.skip(reason="Container.close() lands in Task 3")
+def test_register_accepts_on_close_for_a_class_without_pre_destroy():
+    container = Container()
+    calls: list[object] = []
+
+    class Resource:
+        pass
+
+    container.register(Resource, on_close=lambda instance: calls.append(instance))
+    instance = container.resolve(Resource)
+    container.close()  # type: ignore[attr-defined]
+
+    assert calls == [instance]
+
+
+def test_register_refuses_on_close_together_with_pre_destroy():
+    container = Container()
+
+    class Resource:
+        @pre_destroy
+        def shutdown(self) -> None:
+            pass
+
+    with pytest.raises(RegistrationError, match="both"):
+        container.register(Resource, on_close=lambda instance: None)
+
+
+@pytest.mark.skip(reason="Container.close() lands in Task 3")
+def test_register_factory_accepts_on_close():
+    container = Container()
+    calls: list[object] = []
+
+    container.register_factory(
+        Engine,
+        lambda: Engine("postgres://"),
+        on_close=lambda instance: calls.append(instance),
+    )
+    instance = container.resolve(Engine)
+    container.close()  # type: ignore[attr-defined]
+
+    assert calls == [instance]
+
+
+@pytest.mark.skip(reason="Container.close() lands in Task 3")
+def test_register_instance_accepts_on_close():
+    container = Container()
+    calls: list[object] = []
+    engine = Engine("postgres://")
+
+    container.register_instance(
+        engine, on_close=lambda instance: calls.append(instance)
+    )
+    container.resolve(Engine)
+    container.close()  # type: ignore[attr-defined]
+
+    assert calls == [engine]
+
+
+def test_register_instance_teardown_conflict_uses_the_runtime_type():
+    """find_pre_destroy runs against type(instance), not the as_type key."""
+    container = Container()
+
+    class Resource:
+        @pre_destroy
+        def shutdown(self) -> None:
+            pass
+
+    with pytest.raises(RegistrationError, match="both"):
+        container.register_instance(
+            Resource(), on_close=lambda instance: None
+        )

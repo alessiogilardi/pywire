@@ -15,6 +15,7 @@ from .exceptions import (
     RegistrationError,
     UnconstructibleComponentError,
 )
+from .lifecycle import pre_destroy
 from .markers import Autowired
 
 __all__ = [
@@ -30,6 +31,7 @@ __all__ = [
     "client",
     "component",
     "get_default_container",
+    "pre_destroy",
     "provider",
     "repository",
     "service",

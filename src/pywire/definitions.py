@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum, auto
+from typing import Any
 
 from .plans import InjectionPlan
 
@@ -57,6 +58,12 @@ class BeanDefinition:
             registration time: a forward reference to a class defined later in
             the module can only be resolved late. Never cleared, by rollback or
             by clear_instances(), a plan being a pure function of the class.
+        teardown: Callable invoked with the finished instance during
+            Container.close() or a rollback that discards this bean after it
+            reached ready=True. None means no teardown was declared. Set by
+            lifecycle.resolve_teardown() at registration time, normalizing
+            whichever of @pre_destroy / on_close was used -- Container never
+            branches on which one it was.
     """
 
     cls: type
@@ -65,3 +72,4 @@ class BeanDefinition:
     instance: object | None = None
     ready: bool = False
     plan: InjectionPlan | None = None
+    teardown: Callable[[Any], None] | None = None
