@@ -8,8 +8,14 @@ from fastapi.testclient import TestClient
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 import pywire.fastapi
-from pywire import AnnotationResolutionError, Autowired, Container, component
-from pywire.fastapi import wire
+from pywire import (
+    AnnotationResolutionError,
+    Autowired,
+    Container,
+    component,
+    pre_destroy,
+)
+from pywire.fastapi import pywire_lifespan, wire
 
 
 class PreexistingRouterRepo:
@@ -504,3 +510,160 @@ def test_a_protocol_bound_dependency_resolves_in_a_route():
 
     assert response.status_code == 200
     assert response.json() == {"greeting": "ciao"}
+
+
+def test_pre_destroy_runs_when_the_app_shuts_down():
+    """The whole point: a bean resolved while serving requests gets its
+    teardown called when the ASGI lifespan ends."""
+    log: list[str] = []
+
+    class Pool:
+        @pre_destroy
+        def shutdown(self) -> None:
+            log.append("pool")
+
+    container = Container()
+    container.register(Pool)
+
+    app = FastAPI(lifespan=pywire_lifespan(container=container))
+
+    @app.get("/ping")
+    def ping(pool: Autowired[Pool]) -> dict:
+        return {"ok": True}
+
+    with TestClient(app) as client:
+        assert client.get("/ping").status_code == 200
+        assert log == []
+
+    assert log == ["pool"]
+
+
+def test_shutdown_tears_dependents_down_before_dependencies():
+    """close()'s reverse-ready ordering reaches through the lifespan
+    unchanged: the service that depends on the pool is closed first."""
+    log: list[str] = []
+
+    class Pool:
+        @pre_destroy
+        def shutdown(self) -> None:
+            log.append("pool")
+
+    class Users:
+        pool: Autowired[Pool]
+
+        @pre_destroy
+        def shutdown(self) -> None:
+            log.append("users")
+
+    container = Container()
+    container.register(Pool)
+    container.register(Users)
+
+    app = FastAPI(lifespan=pywire_lifespan(container=container))
+
+    @app.get("/users")
+    def list_users(users: Autowired[Users]) -> dict:
+        return {"ok": True}
+
+    with TestClient(app) as client:
+        client.get("/users")
+
+    assert log == ["users", "pool"]
+
+
+def test_close_on_shutdown_false_binds_without_tearing_down():
+    """The escape hatch for a container shared by more than one app:
+    routes still resolve, nothing is closed."""
+    log: list[str] = []
+
+    class Pool:
+        @pre_destroy
+        def shutdown(self) -> None:
+            log.append("pool")
+
+    container = Container()
+    container.register(Pool)
+
+    app = FastAPI(
+        lifespan=pywire_lifespan(container=container, close_on_shutdown=False)
+    )
+
+    @app.get("/ping")
+    def ping(pool: Autowired[Pool]) -> dict:
+        return {"ok": True}
+
+    with TestClient(app) as client:
+        assert client.get("/ping").status_code == 200
+
+    assert log == []
+
+
+def test_bare_form_binds_and_closes_the_default_container():
+    """FastAPI(lifespan=pywire_lifespan), no parentheses: the module-level
+    default container -- the one @component writes into -- is bound and
+    closed."""
+    log: list[str] = []
+
+    @component
+    class DefaultPool:
+        @pre_destroy
+        def shutdown(self) -> None:
+            log.append("default-pool")
+
+    app = FastAPI(lifespan=pywire_lifespan)
+
+    @app.get("/ping")
+    def ping(pool: Autowired[DefaultPool]) -> dict:
+        return {"ok": True}
+
+    with TestClient(app) as client:
+        assert client.get("/ping").status_code == 200
+
+    assert log == ["default-pool"]
+
+
+def test_empty_parentheses_behave_like_the_bare_form():
+    """pywire_lifespan() is legal -- unlike component(), nothing mandatory
+    is missing -- and means the same as the bare form."""
+    log: list[str] = []
+
+    @component
+    class EmptyParensPool:
+        @pre_destroy
+        def shutdown(self) -> None:
+            log.append("empty-parens-pool")
+
+    app = FastAPI(lifespan=pywire_lifespan())
+
+    @app.get("/ping")
+    def ping(pool: Autowired[EmptyParensPool]) -> dict:
+        return {"ok": True}
+
+    with TestClient(app) as client:
+        assert client.get("/ping").status_code == 200
+
+    assert log == ["empty-parens-pool"]
+
+
+def test_an_explicit_container_is_used_instead_of_the_default_one():
+    """container= wins over the default container, and the app.state
+    binding the routes read at request time points at it."""
+
+    class ScopedService:
+        def __init__(self) -> None:
+            self.origin = "explicit-container"
+
+    container = Container()
+    container.register(ScopedService)
+
+    app = FastAPI(lifespan=pywire_lifespan(container=container))
+
+    @app.get("/origin")
+    def get_origin(service: Autowired[ScopedService]) -> dict:
+        return {"origin": service.origin}
+
+    with TestClient(app) as client:
+        response = client.get("/origin")
+
+    assert response.json() == {"origin": "explicit-container"}
+    assert app.state.pywire_container is container

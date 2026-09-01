@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 import inspect
 import sys
-from collections.abc import Callable
-from typing import TYPE_CHECKING, Any, cast
+from collections.abc import AsyncIterator, Callable
+from contextlib import AbstractAsyncContextManager, asynccontextmanager
+from typing import TYPE_CHECKING, Any, cast, overload
 
 from fastapi import Depends, FastAPI, Request
 from fastapi.routing import APIRouter
@@ -171,3 +173,77 @@ def wire(app: FastAPI, *, container: Container | None = None) -> FastAPI:
         raise TypeError(f"wire() requires a FastAPI instance, got {got}")
     app.state.pywire_container = container or get_default_container()
     return app
+
+
+@overload
+def pywire_lifespan(app: FastAPI) -> AbstractAsyncContextManager[None]: ...
+
+
+@overload
+def pywire_lifespan(
+    *,
+    container: Container | None = None,
+    close_on_shutdown: bool = True,
+) -> Callable[[FastAPI], AbstractAsyncContextManager[None]]: ...
+
+
+def pywire_lifespan(
+    app: FastAPI | None = None,
+    *,
+    container: Container | None = None,
+    close_on_shutdown: bool = True,
+) -> (
+    AbstractAsyncContextManager[None]
+    | Callable[[FastAPI], AbstractAsyncContextManager[None]]
+):
+    """ASGI lifespan that binds a container to an app and closes it on shutdown.
+
+    Usable bare or called with configuration, the same dual form @component
+    uses:
+
+        app = FastAPI(lifespan=pywire_lifespan)
+        app = FastAPI(lifespan=pywire_lifespan(container=container))
+        app = FastAPI(lifespan=pywire_lifespan(close_on_shutdown=False))
+
+    Startup writes app.state.pywire_container -- everything wire() does --
+    so an app using this needs no wire() call. Shutdown calls
+    Container.close(), which is what makes a bean's @pre_destroy or
+    on_close hook actually run when the service stops.
+
+    Bare, it binds and closes the module-level default container: the same
+    one @component registers into, and process-global. In a test suite where
+    two apps share it, one app's shutdown tears down beans the other still
+    holds -- pass close_on_shutdown=False for the apps that should not own
+    that lifetime.
+    """
+    if app is not None:
+        return _run(app, None, True)
+
+    def build(target: FastAPI) -> AbstractAsyncContextManager[None]:
+        return _run(target, container, close_on_shutdown)
+
+    return build
+
+
+@asynccontextmanager
+async def _run(
+    app: FastAPI,
+    container: Container | None,
+    close_on_shutdown: bool,
+) -> AsyncIterator[None]:
+    """Bind at startup, tear down at shutdown.
+
+    close() is synchronous and a teardown hook may block on real I/O
+    (draining a pool, joining a thread), so it runs in a worker thread
+    rather than on the event loop, which still has the rest of the
+    application's shutdown to run. asyncio.to_thread, not anyio: this
+    library declares no dependencies and is not going to start with one it
+    only gets transitively.
+    """
+    resolved = container or get_default_container()
+    app.state.pywire_container = resolved
+
+    yield
+
+    if close_on_shutdown:
+        await asyncio.to_thread(resolved.close)
