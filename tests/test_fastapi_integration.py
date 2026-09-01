@@ -512,6 +512,67 @@ def test_a_protocol_bound_dependency_resolves_in_a_route():
     assert response.json() == {"greeting": "ciao"}
 
 
+def test_lifespan_rejects_a_positional_that_is_not_an_app():
+    """pywire_lifespan(container) -- the keyword forgotten -- must say so,
+    not fail later as an AttributeError on Container.state."""
+    container = Container()
+
+    with pytest.raises(TypeError, match="Container"):
+        pywire_lifespan(container)  # type: ignore[arg-type]
+
+
+def test_lifespan_rejects_an_app_and_configuration_together():
+    """Not reachable through either overload. Running it would ignore
+    container= and bind the default container instead -- silently."""
+    app = FastAPI()
+    container = Container()
+
+    with pytest.raises(TypeError, match="cannot take both"):
+        pywire_lifespan(app, container=container)  # type: ignore[call-overload]
+
+
+def test_two_different_containers_configured_for_one_app_is_rejected():
+    """wire(app, container=A) plus pywire_lifespan(container=B): one of the
+    two is dead configuration and its beans would never be closed."""
+
+    class ConflictService:
+        pass
+
+    first = Container()
+    first.register(ConflictService)
+    second = Container()
+    second.register(ConflictService)
+
+    app = FastAPI(lifespan=pywire_lifespan(container=second))
+    wire(app, container=first)
+
+    with pytest.raises(RuntimeError, match="already bound"):
+        with TestClient(app):
+            pass
+
+
+def test_the_same_container_configured_twice_is_accepted():
+    """Redundant, not contradictory: wire() and the lifespan naming the
+    same object is harmless and must not raise."""
+
+    class RedundantService:
+        def __init__(self) -> None:
+            self.origin = "redundant"
+
+    container = Container()
+    container.register(RedundantService)
+
+    app = FastAPI(lifespan=pywire_lifespan(container=container))
+    wire(app, container=container)
+
+    @app.get("/origin")
+    def get_origin(service: Autowired[RedundantService]) -> dict:
+        return {"origin": service.origin}
+
+    with TestClient(app) as client:
+        assert client.get("/origin").json() == {"origin": "redundant"}
+
+
 def test_pre_destroy_runs_when_the_app_shuts_down():
     """The whole point: a bean resolved while serving requests gets its
     teardown called when the ASGI lifespan ends."""

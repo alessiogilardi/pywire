@@ -217,6 +217,21 @@ def pywire_lifespan(
     that lifetime.
     """
     if app is not None:
+        if container is not None or not close_on_shutdown:
+            # Neither @overload reaches this. Binding app while dropping the
+            # configuration would silently use the wrong container -- the one
+            # silent failure component() refuses for the same reason.
+            raise TypeError(
+                "pywire_lifespan() cannot take both an app and configuration. "
+                "Write FastAPI(lifespan=pywire_lifespan(container=...)) instead."
+            )
+
+        if not isinstance(app, FastAPI):
+            got = type(app).__name__
+            raise TypeError(
+                f"pywire_lifespan() requires a FastAPI instance, got {got}"
+            )
+
         return _run(app, None, True)
 
     def build(target: FastAPI) -> AbstractAsyncContextManager[None]:
@@ -241,6 +256,16 @@ async def _run(
     only gets transitively.
     """
     resolved = container or get_default_container()
+    existing = getattr(app.state, "pywire_container", None)
+
+    if existing is not None and existing is not resolved:
+        raise RuntimeError(
+            "This app is already bound to a different pywire container "
+            "(app.state.pywire_container). Configure it once -- either with "
+            "pywire_lifespan(container=...) or with wire(app, container=...), "
+            "not both."
+        )
+
     app.state.pywire_container = resolved
 
     yield
