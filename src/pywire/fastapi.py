@@ -268,7 +268,12 @@ async def _run(
 
     app.state.pywire_container = resolved
 
-    yield
-
-    if close_on_shutdown:
-        await asyncio.to_thread(resolved.close)
+    try:
+        yield
+    finally:
+        # An exception raised during a nested startup, or while serving, is
+        # thrown in at the yield -- without the finally, that is precisely
+        # when the teardown would be skipped. If close() then raises too,
+        # Python keeps the original in __context__.
+        if close_on_shutdown:
+            await asyncio.to_thread(resolved.close)

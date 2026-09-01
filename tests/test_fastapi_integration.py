@@ -1,5 +1,7 @@
 import functools
 import importlib
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from typing import Protocol
 
 import pytest
@@ -727,4 +729,111 @@ def test_an_explicit_container_is_used_instead_of_the_default_one():
         response = client.get("/origin")
 
     assert response.json() == {"origin": "explicit-container"}
+    assert app.state.pywire_container is container
+
+
+def _teardown_leaves(error: BaseException) -> list[BaseException]:
+    """Flatten nested exception groups down to their leaf exceptions.
+
+    close() raises an ExceptionGroup, and starlette/anyio may wrap what
+    propagates out of the lifespan in a further group. Asserting on the
+    leaves keeps these tests independent of how many layers of grouping
+    happen to be in play.
+    """
+    if isinstance(error, BaseExceptionGroup):
+        return [leaf for sub in error.exceptions for leaf in _teardown_leaves(sub)]
+
+    return [error]
+
+
+def test_teardown_runs_even_when_startup_fails_after_pywire():
+    """A nested lifespan that warms beans up and then explodes: the app
+    never serves a request, but the beans it did build are still closed."""
+    log: list[str] = []
+
+    class WarmedPool:
+        @pre_destroy
+        def shutdown(self) -> None:
+            log.append("warmed-pool")
+
+    container = Container()
+    container.register(WarmedPool)
+
+    @asynccontextmanager
+    async def failing_startup(app: FastAPI) -> AsyncIterator[None]:
+        async with pywire_lifespan(container=container)(app):
+            container.resolve(WarmedPool)
+            raise RuntimeError("startup boom")
+            yield  # unreachable; keeps this function an async generator
+
+    app = FastAPI(lifespan=failing_startup)
+
+    with pytest.raises(RuntimeError, match="startup boom"):
+        with TestClient(app):
+            pass
+
+    assert log == ["warmed-pool"]
+
+
+def test_a_failing_teardown_propagates_out_of_shutdown():
+    """close() aggregates teardown failures into an ExceptionGroup; the
+    lifespan lets it out rather than logging and swallowing it."""
+
+    class BrokenPool:
+        @pre_destroy
+        def shutdown(self) -> None:
+            raise ValueError("teardown boom")
+
+    container = Container()
+    container.register(BrokenPool)
+
+    app = FastAPI(lifespan=pywire_lifespan(container=container))
+
+    @app.get("/ping")
+    def ping(pool: Autowired[BrokenPool]) -> dict:
+        return {"ok": True}
+
+    with pytest.raises(BaseException) as caught:
+        with TestClient(app) as client:
+            client.get("/ping")
+
+    leaves = _teardown_leaves(caught.value)
+
+    assert any(
+        isinstance(leaf, ValueError) and str(leaf) == "teardown boom"
+        for leaf in leaves
+    )
+
+
+def test_a_second_startup_rebuilds_and_tears_down_again():
+    """close() leaves no 'closed' state: running the app's lifespan twice
+    builds a fresh bean the second time and closes it too."""
+    built: list[int] = []
+    closed: list[int] = []
+
+    class CycledPool:
+        def __init__(self) -> None:
+            self.serial = len(built)
+            built.append(self.serial)
+
+        @pre_destroy
+        def shutdown(self) -> None:
+            closed.append(self.serial)
+
+    container = Container()
+    container.register(CycledPool)
+
+    app = FastAPI(lifespan=pywire_lifespan(container=container))
+
+    @app.get("/ping")
+    def ping(pool: Autowired[CycledPool]) -> dict:
+        return {"serial": pool.serial}
+
+    with TestClient(app) as client:
+        assert client.get("/ping").json() == {"serial": 0}
+
+    with TestClient(app) as client:
+        assert client.get("/ping").json() == {"serial": 1}
+
+    assert closed == [0, 1]
     assert app.state.pywire_container is container
