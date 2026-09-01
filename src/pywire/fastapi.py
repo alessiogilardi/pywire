@@ -230,7 +230,7 @@ def pywire_lifespan(
             # silent failure component() refuses for the same reason.
             raise TypeError(
                 "pywire_lifespan() cannot take both an app and configuration. "
-                "Write FastAPI(lifespan=pywire_lifespan(container=...)) instead."
+                "Write FastAPI(lifespan=pywire_lifespan(...)) instead."
             )
 
         if not isinstance(app, FastAPI):

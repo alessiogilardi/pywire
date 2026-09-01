@@ -383,28 +383,41 @@ never closed. Naming the same container twice is fine.
 `wire()` remains available and unchanged, but `pywire_lifespan` supersedes it: `wire()`
 only binds, and an app wired that way never tears its beans down.
 
+Unlike `wire()`, which bound the container the moment it was called, `pywire_lifespan`
+binds `app.state.pywire_container` only when the lifespan actually runs, i.e. at
+startup. `TestClient(app).get(...)` used without a `with` block never runs the
+lifespan, so the container is never bound: any `Autowired[T]` route resolves against
+the module-level default container instead (silently, unless the expected component
+was never registered there), and code reading `app.state.pywire_container` directly
+finds nothing. Tests that exercise a `pywire_lifespan`-configured app must use
+`with TestClient(app) as client:` so startup and shutdown actually run.
+
 ### Resolution
 
 Decorating a route with a bare `Autowired[T]` parameter is always safe, on any `APIRouter`,
 regardless of whether `wire(app, ...)` has run yet — this holds even for the common pattern of
 one `APIRouter` per module, decorated at import time, later mounted onto the app with
 `app.include_router(router)` inside a `create_app()` factory. The actual container lookup is
-deferred to request time: it reads `app.state.pywire_container` (set by `wire()`), falling back
-to the default container if `wire()` was never called for that app. `wire(app, ...)` only needs
-to run before the first *request* comes in — not before any route is decorated. (HTTP routes
-only — WebSocket routes are not covered, same as before this redesign.)
+deferred to request time: it reads `app.state.pywire_container` (set by either
+`pywire_lifespan` or `wire()`), falling back to the default container if neither ran for that
+app. `pywire_lifespan`/`wire(app, ...)` only need to run before the first *request* comes in —
+not before any route is decorated. (HTTP routes only — WebSocket routes are not covered, same
+as before this redesign.)
 
 This safety does require `pywire.fastapi` itself to be imported before any module that
-decorates a route with `Autowired[T]` — e.g. `from pywire.fastapi import wire` near the top of
-your app's entrypoint, before importing your router modules. The global patch that makes
-decoration order-independent is installed at `pywire.fastapi`'s own import time; if a router
-module is imported first, without `pywire.fastapi` anywhere in `sys.modules` yet, the same
-decoration-time error this redesign eliminates can still occur.
+decorates a route with `Autowired[T]` — e.g. `from pywire.fastapi import pywire_lifespan` near
+the top of your app's entrypoint, before importing your router modules. The global patch that
+makes decoration order-independent is installed at `pywire.fastapi`'s own import time; if a
+router module is imported first, without `pywire.fastapi` anywhere in `sys.modules` yet, the
+same decoration-time error this redesign eliminates can still occur.
 
-If you forget to call `wire(app, container=...)` for a specific app, this fails silently rather
-than loudly — parameters resolve against the default container, which may not have the
-component you expect registered (or may hold a different instance than intended). Always call
-`wire(app, container=...)` explicitly in apps that use more than the default container.
+If you forget to configure a container for a specific app, this fails silently rather than
+loudly — parameters resolve against the default container, which may not have the component
+you expect registered (or may hold a different instance than intended). Prefer
+`FastAPI(lifespan=pywire_lifespan(container=...))` in apps that use more than the default
+container — it also ensures that container's beans are closed on shutdown. `wire(app,
+container=...)` still works and remains a valid choice for an app that deliberately does not
+want its container's lifetime tied to the app's own lifespan.
 
 If you previously called `wire(router, ...)` on an `APIRouter`, remove that call — `wire()` now
 only accepts the `FastAPI` app; routers no longer need to be wired individually.

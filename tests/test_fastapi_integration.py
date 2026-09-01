@@ -533,6 +533,16 @@ def test_lifespan_rejects_an_app_and_configuration_together():
         pywire_lifespan(app, container=container)  # type: ignore[call-overload]
 
 
+def test_lifespan_rejects_an_app_and_close_on_shutdown_together():
+    """Same guard as above, triggered by close_on_shutdown instead of
+    container -- both are configuration that an app-bound call would
+    silently ignore."""
+    app = FastAPI()
+
+    with pytest.raises(TypeError, match="cannot take both"):
+        pywire_lifespan(app, close_on_shutdown=False)  # type: ignore[call-overload]
+
+
 def test_two_different_containers_configured_for_one_app_is_rejected():
     """wire(app, container=A) plus pywire_lifespan(container=B): one of the
     two is dead configuration and its beans would never be closed."""
