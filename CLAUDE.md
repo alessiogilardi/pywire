@@ -376,6 +376,25 @@ knowledge of this module.
   above — silently: a forgotten `wire(app, container=...)` does not fail, it just resolves
   against a container that may not have the expected component registered. See
   `tests/test_fastapi_integration.py`.
+- `pywire_lifespan(app=None, *, container=None, close_on_shutdown=True)` is the entry
+  point that supersedes `wire()`: as an ASGI lifespan it does `wire()`'s binding at
+  startup and `Container.close()` at shutdown, which is the only thing in the FastAPI
+  integration that ever fires a bean's `@pre_destroy` / `on_close`. Dual-form on the
+  positional argument, exactly like `component` in `decorators.py` — a `FastAPI`
+  positional means "I am the lifespan", no positional means "I am a factory" — with a
+  `TypeError` for the combination no `@overload` reaches (`app` plus configuration) and
+  for a positional that is not a `FastAPI`, mirroring `wire()`'s own guard.
+  `close()` runs through `asyncio.to_thread`: it is synchronous and may block on I/O,
+  and `anyio` is deliberately not used because it is not a declared dependency of this
+  library — it only arrives transitively through starlette. The teardown sits in a
+  `finally`, so a nested startup that fails after pywire's own still closes whatever was
+  built. Startup raises `RuntimeError` — not a `PyWireError`: no bean is involved and
+  `chain`/`requester` would be empty — if `app.state.pywire_container` already holds a
+  *different* container, since one of the two configurations would be dead and its beans
+  never closed; the same object twice is accepted. The binding is left in place after
+  shutdown, because `close()` has no "closed" state and clearing it would silently fall
+  back to a different container. `wire()` is unchanged and deprecated in documentation
+  only — no runtime `DeprecationWarning` while 0.x has no removal date to offer.
 
 ### Versioning (`scripts/bump-version.sh`)
 
@@ -401,7 +420,7 @@ covers what tests used it for.
 | `markers.py` | `Autowired[T]`, `evaluate_annotation()`, `callable_hints()`, `resolve_autowired_type()` |
 | `exceptions.py` | Immutable `PyWireError` hierarchy with `with_context()` |
 | `lifecycle.py` | `pre_destroy` marker decorator; `find_pre_destroy` (pure MRO-respecting discovery); `resolve_teardown` (reconciles `@pre_destroy` with `on_close`) |
-| `fastapi.py` | Optional FastAPI integration: `wire()`, `_install_patch`, `_wire_endpoint`, `_resolve_autowired` — resolves bare `Autowired[T]` route parameters via a global `add_api_route` patch |
+| `fastapi.py` | Optional FastAPI integration: `pywire_lifespan()`, `wire()`, `_install_patch`, `_wire_endpoint`, `_resolve_autowired` — resolves bare `Autowired[T]` route parameters via a global `add_api_route` patch, and ties container teardown to the ASGI lifespan |
 
 ## Conventions to preserve
 

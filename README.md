@@ -33,6 +33,8 @@ class DBClient:
   containers yields two independent singletons
 - Typed exception hierarchy rooted at PyWireError
 - Optional FastAPI integration (`pywire.fastapi.wire`) for bare `Autowired[T]` route parameters
+- **FastAPI lifespan** — `FastAPI(lifespan=pywire_lifespan(container=container))` binds the
+  container and tears every bean down when the service stops.
 - Lifecycle teardown via `@pre_destroy` or `on_close=`, run by `Container.close()` in
   reverse build order
 
@@ -295,13 +297,13 @@ uv pip install -e ".[fastapi]"
 
 ### Usage
 
-Call `wire()` once on your `FastAPI` app, at any point relative to route/router decoration:
+Pass `pywire_lifespan` to your `FastAPI` app; routes can be decorated at any point relative to it:
 
 ```python
 from fastapi import FastAPI
 
 from pywire import Autowired, Container
-from pywire.fastapi import wire
+from pywire.fastapi import pywire_lifespan
 
 
 class UserRepository:
@@ -316,8 +318,7 @@ container = Container()
 container.register(UserRepository)
 container.register(UserService)
 
-app = FastAPI()
-wire(app, container=container)
+app = FastAPI(lifespan=pywire_lifespan(container=container))
 
 
 @app.get("/users")
@@ -325,8 +326,60 @@ def list_users(service: Autowired[UserService]) -> dict:
     return {"repository": type(service.repository).__name__}
 ```
 
-If `container` is omitted, `wire()` falls back to the same module-level default container
+If `container` is omitted, `pywire_lifespan` falls back to the same module-level default container
 used by `@component`.
+
+### Lifespan and teardown
+
+`pywire_lifespan` binds the container at startup and calls `Container.close()` at
+shutdown, so every bean's `@pre_destroy` / `on_close` hook runs when the service stops:
+
+```python
+from fastapi import FastAPI
+
+from pywire import Container
+from pywire.fastapi import pywire_lifespan
+
+container = Container()
+container.register(ConnectionPool)
+container.register(UserService)
+
+app = FastAPI(lifespan=pywire_lifespan(container=container))
+```
+
+Bare, it binds and closes the module-level default container — the one `@component`
+writes into:
+
+```python
+app = FastAPI(lifespan=pywire_lifespan)
+```
+
+That container is process-global, so in a test suite where two apps share it, one app's
+shutdown tears down beans the other still holds. `pywire_lifespan(close_on_shutdown=False)`
+binds without closing, for the apps that should not own that lifetime.
+
+To compose it with your own lifespan, nest pywire's on the outside so your shutdown code
+still sees live beans:
+
+```python
+@asynccontextmanager
+async def app_lifespan(app: FastAPI):
+    async with pywire_lifespan(container=container)(app):
+        await run_migrations()
+        yield
+        await flush_metrics()   # beans still alive here
+    # container.close() runs here
+```
+
+`close()` runs in a worker thread, so a teardown that blocks on I/O does not stall the
+rest of the application's shutdown. Teardown failures propagate as the same
+`ExceptionGroup` `Container.close()` raises — they are never swallowed. Configuring one
+app with both `wire(app, container=A)` and `pywire_lifespan(container=B)` raises a
+`RuntimeError` at startup: one of the two would be dead configuration whose beans are
+never closed. Naming the same container twice is fine.
+
+`wire()` remains available and unchanged, but `pywire_lifespan` supersedes it: `wire()`
+only binds, and an app wired that way never tears its beans down.
 
 ### Resolution
 
@@ -366,7 +419,7 @@ pywire/
 ├── exceptions.py      # Exception hierarchy
 ├── markers.py         # Autowired[T] marker and annotation evaluation
 ├── lifecycle.py       # @pre_destroy marker and teardown resolution
-├── fastapi.py         # Optional FastAPI integration (wire())
+├── fastapi.py         # Optional FastAPI integration (pywire_lifespan(), wire())
 └── __init__.py         # Public API
 ```
 

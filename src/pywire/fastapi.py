@@ -159,6 +159,13 @@ _install_patch()
 def wire(app: FastAPI, *, container: Container | None = None) -> FastAPI:
     """Associate container with app for Autowired[T] route parameter resolution.
 
+    Deprecated in favour of pywire_lifespan, which does this binding at
+    startup *and* closes the container at shutdown, so a bean's teardown
+    actually runs when the service stops. wire() still works and is not
+    scheduled for removal; use it when an app deliberately does not own its
+    container's lifetime -- pywire_lifespan(close_on_shutdown=False) covers
+    that case too.
+
     Safe to call at any point relative to route/router decoration -- decorating
     a route with a bare Autowired[T] parameter never fails, on any router,
     whether or not wire() has been called yet. If wire() is never called for
