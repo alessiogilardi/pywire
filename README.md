@@ -359,7 +359,9 @@ shutdown tears down beans the other still holds. `pywire_lifespan(close_on_shutd
 binds without closing, for the apps that should not own that lifetime.
 
 To compose it with your own lifespan, nest pywire's on the outside so your shutdown code
-still sees live beans:
+runs while beans are still alive. This works because `pywire_lifespan`'s teardown sits in a
+`finally` block: it closes the container whether your nested startup succeeds or fails, and
+only after your outer shutdown code completes.
 
 ```python
 @asynccontextmanager
@@ -367,8 +369,8 @@ async def app_lifespan(app: FastAPI):
     async with pywire_lifespan(container=container)(app):
         await run_migrations()
         yield
-        await flush_metrics()   # beans still alive here
-    # container.close() runs here
+        await flush_metrics()   # run before container.close()
+    # container.close() runs after this block exits
 ```
 
 `close()` runs in a worker thread, so a teardown that blocks on I/O does not stall the
