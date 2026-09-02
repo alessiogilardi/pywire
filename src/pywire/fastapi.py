@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import sys
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncGenerator, Callable
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from typing import TYPE_CHECKING, Any, cast, overload
 
@@ -252,7 +252,7 @@ async def _run(
     app: FastAPI,
     container: Container | None,
     close_on_shutdown: bool,
-) -> AsyncIterator[None]:
+) -> AsyncGenerator[None]:
     """Bind at startup, tear down at shutdown.
 
     close() is synchronous and a teardown hook may block on real I/O
