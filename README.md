@@ -389,6 +389,34 @@ was never registered there), and code reading `app.state.pywire_container` direc
 finds nothing. Tests that exercise a `pywire_lifespan`-configured app must use
 `with TestClient(app) as client:` so startup and shutdown actually run.
 
+### Binding without a lifespan
+
+`app.state.pywire_container` is a plain Starlette attribute — the idiomatic per-app-instance
+storage extension point, not a pywire-specific mechanism — so you can set it directly instead
+of going through `pywire_lifespan`:
+
+```python
+app = FastAPI()
+app.state.pywire_container = container
+```
+
+This binds eagerly, the moment the line runs, with no dependency on the ASGI lifespan
+protocol ever executing. That distinction matters in two situations `pywire_lifespan`
+cannot cover:
+
+- **Sub-apps mounted with `app.mount(...)`**: Starlette does not propagate the parent app's
+  lifespan to a mounted sub-app, so a sub-app configured only via `pywire_lifespan` never
+  sees its startup and its `Autowired[T]` routes silently fall back to the default container.
+- **ASGI runners or embeddings that skip the lifespan protocol** (some minimal adapters, or
+  a `FastAPI` instance driven directly rather than served): if lifespan never runs, neither
+  does any lifespan-bound configuration.
+
+There is no teardown attached to a direct assignment — no `close()` call, so no
+`@pre_destroy`/`on_close` hook ever fires for that container. Prefer
+`FastAPI(lifespan=pywire_lifespan(container=...))` whenever the app does own the container's
+lifetime; reach for direct assignment only for the eager, lifespan-independent case above,
+or for test setup that does not care about teardown.
+
 ### Resolution
 
 Decorating a route with a bare `Autowired[T]` parameter is always safe, on any `APIRouter`,

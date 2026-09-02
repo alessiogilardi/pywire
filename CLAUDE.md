@@ -371,8 +371,8 @@ knowledge of this module.
   fallback above — silently: a forgotten container configuration does not fail, it just resolves
   against a container that may not have the expected component registered. See
   `tests/test_fastapi_integration.py`.
-- `pywire_lifespan(app=None, *, container=None, close_on_shutdown=True)` is the sole entry
-  point for configuring a container on a FastAPI app: as an ASGI lifespan it writes
+- `pywire_lifespan(app=None, *, container=None, close_on_shutdown=True)` is the recommended
+  entry point for configuring a container on a FastAPI app: as an ASGI lifespan it writes
   `app.state.pywire_container` at startup and calls `Container.close()` at shutdown, which is
   the only thing in the FastAPI integration that ever fires a bean's `@pre_destroy` /
   `on_close`. Dual-form on the positional argument, exactly like `component` in
@@ -389,6 +389,19 @@ knowledge of this module.
   since one of the two configurations would be dead and its beans never closed; the same
   object twice is accepted. The binding is left in place after shutdown, because `close()`
   has no "closed" state and clearing it would silently fall back to a different container.
+- **`app.state.pywire_container = container` (direct assignment) is the sanctioned escape
+  hatch, not a workaround.** `wire()` was removed in v0.8.0 rather than kept alongside
+  `pywire_lifespan` because everything it did was exactly this one line plus an
+  `isinstance(app, FastAPI)` check — no capability of its own. Its one genuinely
+  irreplaceable property, binding *eagerly and unconditionally* (independent of whether the
+  ASGI lifespan protocol ever runs), is a property of the assignment itself, not of a
+  wrapper function, so removing the wrapper lost nothing. Reach for direct assignment when
+  `pywire_lifespan` structurally cannot fire: a sub-app mounted with `app.mount(...)` (Starlette
+  does not propagate the parent's lifespan to a mounted sub-app), an ASGI runner or embedding
+  that skips the lifespan protocol, or test setup that has no interest in teardown. It carries
+  no teardown of its own — no `close()` call, so no `@pre_destroy`/`on_close` hook fires for
+  that container — and no type validation of `app`, the same trust boundary already accepted
+  for `as_type` and `on_close`. Documented in `README.md` §Binding without a lifespan.
 
 ### Versioning (`scripts/bump-version.sh`)
 
