@@ -317,16 +317,16 @@ handlers declare dependencies as bare `Autowired[T]` parameters instead of manua
 knowledge of this module.
 
 - The module patches `fastapi.routing.APIRouter.add_api_route` once, at import time (a
-  top-level `_install_patch()` call, not something `wire()` triggers) — not per-target like the
-  old `route_class` mechanism. `add_api_route` is the single choke point every
-  `@router.get/post/put/...`-style decorator passes through to build an `APIRoute`, so patching
-  it intercepts every route, on every `APIRouter`, independent of `wire()` call order, target
-  identity, or whether `wire()` was ever called for that specific router at all. (HTTP routes
-  only — `add_api_websocket_route` is not patched, so WebSocket routes are not covered; this is
-  not a regression, the old design didn't cover WebSockets either.)
+  top-level `_install_patch()` call, not something a container-configuration call triggers) —
+  not per-target like the old `route_class` mechanism. `add_api_route` is the single choke
+  point every `@router.get/post/put/...`-style decorator passes through to build an `APIRoute`,
+  so patching it intercepts every route, on every `APIRouter`, independent of when (or whether)
+  the app's container is ever configured. (HTTP routes only — `add_api_websocket_route` is not
+  patched, so WebSocket routes are not covered; this is not a regression, the old design didn't
+  cover WebSockets either.)
 - This does require `pywire.fastapi` itself to be imported before any module that decorates a
-  route with `Autowired[T]` — e.g. `from pywire.fastapi import wire` near the top of the app's
-  entrypoint, before importing router modules. The global patch above is installed at
+  route with `Autowired[T]` — e.g. `from pywire.fastapi import pywire_lifespan` near the top of
+  the app's entrypoint, before importing router modules. The global patch above is installed at
   `pywire.fastapi`'s own import time; if a router module is imported first, with
   `pywire.fastapi` not yet in `sys.modules`, the original decoration-time `FastAPIError` this
   redesign eliminates can still occur.
@@ -361,40 +361,34 @@ knowledge of this module.
   `request.app.state.pywire_container` (falling back to `get_default_container()` if unset) and
   calls `container.resolve(target)`. Container resolution is deferred to **request time**, not
   baked in at decoration time — this is what allows decoration to always be safe regardless of
-  whether `wire(app, container=...)` has run yet: the container only needs to exist by the time
-  the first *request* comes in, not by the time routes are decorated.
-- `wire(app: FastAPI, *, container: Container | None = None) -> FastAPI` requires `app` to be a
-  `FastAPI` instance — it raises `TypeError` otherwise, including for a bare `APIRouter`, which
-  is no longer a supported target. It sets `app.state.pywire_container = container or
-  get_default_container()` and returns `app`. `app.state` is Starlette's own idiomatic
-  per-app-instance storage extension point — no separate module-level registry needed.
-- **No more ordering limitation** (see the import-order precondition above): because every
-  route is rewritten at decoration time regardless of `wire()` call order, `wire(app)` can run
-  at any point relative to route/router decoration — before, after, or interleaved. If `wire()`
-  is never called for an app at all, `Autowired[T]` parameters resolve against the module-level
-  default container (the same one `@component` uses), via the `_resolve_autowired` fallback
-  above — silently: a forgotten `wire(app, container=...)` does not fail, it just resolves
+  whether `app.state.pywire_container` has been set yet: the container only needs to exist by
+  the time the first *request* comes in, not by the time routes are decorated.
+- **No ordering limitation** (see the import-order precondition above): because every route is
+  rewritten at decoration time regardless of when the container is configured, configuration can
+  happen at any point relative to route/router decoration — before, after, or interleaved. If an
+  app's container is never configured at all, `Autowired[T]` parameters resolve against the
+  module-level default container (the same one `@component` uses), via the `_resolve_autowired`
+  fallback above — silently: a forgotten container configuration does not fail, it just resolves
   against a container that may not have the expected component registered. See
   `tests/test_fastapi_integration.py`.
-- `pywire_lifespan(app=None, *, container=None, close_on_shutdown=True)` is the entry
-  point that supersedes `wire()`: as an ASGI lifespan it does `wire()`'s binding at
-  startup and `Container.close()` at shutdown, which is the only thing in the FastAPI
-  integration that ever fires a bean's `@pre_destroy` / `on_close`. Dual-form on the
-  positional argument, exactly like `component` in `decorators.py` — a `FastAPI`
-  positional means "I am the lifespan", no positional means "I am a factory" — with a
-  `TypeError` for the combination no `@overload` reaches (`app` plus configuration) and
-  for a positional that is not a `FastAPI`, mirroring `wire()`'s own guard.
+- `pywire_lifespan(app=None, *, container=None, close_on_shutdown=True)` is the sole entry
+  point for configuring a container on a FastAPI app: as an ASGI lifespan it writes
+  `app.state.pywire_container` at startup and calls `Container.close()` at shutdown, which is
+  the only thing in the FastAPI integration that ever fires a bean's `@pre_destroy` /
+  `on_close`. Dual-form on the positional argument, exactly like `component` in
+  `decorators.py` — a `FastAPI` positional means "I am the lifespan", no positional means "I am
+  a factory" — with a `TypeError` for the combination no `@overload` reaches (`app` plus
+  configuration) and for a positional that is not a `FastAPI`.
   `close()` runs through `asyncio.to_thread`: it is synchronous and may block on I/O,
   and `anyio` is deliberately not used because it is not a declared dependency of this
   library — it only arrives transitively through starlette. The teardown sits in a
   `finally`, so a nested startup that fails after pywire's own still closes whatever was
   built. Startup raises `RuntimeError` — not a `PyWireError`: no bean is involved and
   `chain`/`requester` would be empty — if `app.state.pywire_container` already holds a
-  *different* container, since one of the two configurations would be dead and its beans
-  never closed; the same object twice is accepted. The binding is left in place after
-  shutdown, because `close()` has no "closed" state and clearing it would silently fall
-  back to a different container. `wire()` is unchanged and deprecated in documentation
-  only — no runtime `DeprecationWarning` while 0.x has no removal date to offer.
+  *different* container (e.g. set directly by application code before the lifespan runs),
+  since one of the two configurations would be dead and its beans never closed; the same
+  object twice is accepted. The binding is left in place after shutdown, because `close()`
+  has no "closed" state and clearing it would silently fall back to a different container.
 
 ### Versioning (`scripts/bump-version.sh`)
 
@@ -420,7 +414,7 @@ covers what tests used it for.
 | `markers.py` | `Autowired[T]`, `evaluate_annotation()`, `callable_hints()`, `resolve_autowired_type()` |
 | `exceptions.py` | Immutable `PyWireError` hierarchy with `with_context()` |
 | `lifecycle.py` | `pre_destroy` marker decorator; `find_pre_destroy` (pure MRO-respecting discovery); `resolve_teardown` (reconciles `@pre_destroy` with `on_close`) |
-| `fastapi.py` | Optional FastAPI integration: `pywire_lifespan()`, `wire()`, `_install_patch`, `_wire_endpoint`, `_resolve_autowired` — resolves bare `Autowired[T]` route parameters via a global `add_api_route` patch, and ties container teardown to the ASGI lifespan |
+| `fastapi.py` | Optional FastAPI integration: `pywire_lifespan()`, `_install_patch`, `_wire_endpoint`, `_resolve_autowired` — resolves bare `Autowired[T]` route parameters via a global `add_api_route` patch, and ties container teardown to the ASGI lifespan |
 
 ## Conventions to preserve
 

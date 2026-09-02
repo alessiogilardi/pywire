@@ -124,8 +124,9 @@ def _wire_endpoint(func: Callable[..., object]) -> None:
 
 def _install_patch() -> None:
     """Patch APIRouter.add_api_route once, so every route on every router
-    -- regardless of wire() call order -- has bare Autowired[T] parameters
-    rewritten before FastAPI validates them. Guarded by a marker attribute
+    -- regardless of when the app's container is configured -- has bare
+    Autowired[T] parameters rewritten before FastAPI validates them.
+    Guarded by a marker attribute
     on the installed wrapper so re-running this module's body (e.g. via
     importlib.reload) never wraps an already-patched add_api_route again.
     _patched_add_api_route is defined as a closure here, not at module
@@ -154,32 +155,6 @@ def _install_patch() -> None:
 
 
 _install_patch()
-
-
-def wire(app: FastAPI, *, container: Container | None = None) -> FastAPI:
-    """Associate container with app for Autowired[T] route parameter resolution.
-
-    Deprecated in favour of pywire_lifespan, which does this binding at
-    startup *and* closes the container at shutdown, so a bean's teardown
-    actually runs when the service stops. wire() still works and is not
-    scheduled for removal; use it when an app deliberately does not own its
-    container's lifetime -- pywire_lifespan(close_on_shutdown=False) covers
-    that case too.
-
-    Safe to call at any point relative to route/router decoration -- decorating
-    a route with a bare Autowired[T] parameter never fails, on any router,
-    whether or not wire() has been called yet. If wire() is never called for
-    an app, Autowired[T] parameters resolve against the module-level default
-    container (the same one @component uses).
-
-    Raises:
-        TypeError: if app is not a FastAPI instance.
-    """
-    if not isinstance(app, FastAPI):
-        got = type(app).__name__
-        raise TypeError(f"wire() requires a FastAPI instance, got {got}")
-    app.state.pywire_container = container or get_default_container()
-    return app
 
 
 @overload
@@ -212,9 +187,9 @@ def pywire_lifespan(
         app = FastAPI(lifespan=pywire_lifespan(container=container))
         app = FastAPI(lifespan=pywire_lifespan(close_on_shutdown=False))
 
-    Startup writes app.state.pywire_container -- everything wire() does --
-    so an app using this needs no wire() call. Shutdown calls
-    Container.close(), which is what makes a bean's @pre_destroy or
+    Startup writes app.state.pywire_container, which is what lets
+    Autowired[T] route parameters resolve against this container. Shutdown
+    calls Container.close(), which is what makes a bean's @pre_destroy or
     on_close hook actually run when the service stops.
 
     Bare, it binds and closes the module-level default container: the same
@@ -269,8 +244,8 @@ async def _run(
         raise RuntimeError(
             "This app is already bound to a different pywire container "
             "(app.state.pywire_container). Configure it once -- either with "
-            "pywire_lifespan(container=...) or with wire(app, container=...), "
-            "not both."
+            "pywire_lifespan(container=...) or by setting "
+            "app.state.pywire_container directly, not both."
         )
 
     app.state.pywire_container = resolved

@@ -17,7 +17,7 @@ from pywire import (
     component,
     pre_destroy,
 )
-from pywire.fastapi import pywire_lifespan, wire
+from pywire.fastapi import pywire_lifespan
 
 
 class PreexistingRouterRepo:
@@ -66,7 +66,7 @@ def test_route_reuses_same_singleton_across_requests():
     container.register(Service)
 
     app = FastAPI()
-    wire(app, container=container)
+    app.state.pywire_container = container
 
     @app.get("/calls")
     def get_calls(service: Autowired[Service]) -> dict:
@@ -89,7 +89,7 @@ def test_route_reaches_nested_field_injection():
     container.register(Service)
 
     app = FastAPI()
-    wire(app, container=container)
+    app.state.pywire_container = container
 
     @app.get("/repo-value")
     def get_repo_value(service: Autowired[Service]) -> dict:
@@ -114,7 +114,7 @@ def test_route_resolves_forward_reference_string():
     container.register(ForwardRefService)
 
     app = FastAPI()
-    wire(app, container=container)
+    app.state.pywire_container = container
 
     @app.get("/forward-ref")
     def get_forward_ref(service: Autowired["ForwardRefService"]) -> dict:
@@ -132,17 +132,17 @@ class CustomContainerService:
         self.origin = "custom-container"
 
 
-def test_wire_uses_explicit_container_instead_of_default():
-    """An explicit container= passed to wire() is used instead of the
-    global default container: the default container's registry does not
-    contain the component, only the explicit one does."""
+def test_explicit_container_on_app_state_is_used_instead_of_default():
+    """A container set explicitly on app.state.pywire_container is used
+    instead of the global default container: the default container's
+    registry does not contain the component, only the explicit one does."""
     from pywire.decorators import get_default_container
 
     my_container = Container()
     my_container.register(CustomContainerService)
 
     app = FastAPI()
-    wire(app, container=my_container)
+    app.state.pywire_container = my_container
 
     @app.get("/origin")
     def get_origin(service: Autowired[CustomContainerService]) -> dict:
@@ -178,16 +178,16 @@ class RouterService:
         return self.calls
 
 
-def test_wire_router_before_decoration_supports_include_router_pattern():
+def test_router_decorated_before_container_configured_supports_include_router_pattern():
     """Real-world pattern: routes are declared on a per-module APIRouter via
     decorators, then the router is mounted onto the app with
-    include_router(). The router is built and its route decorated with no
-    wire() call in sight -- wire() only ever runs on the FastAPI app, after
-    the router already exists, before include_router() mounts it. The
-    global add_api_route patch is what makes this safe: the route's bare
-    Autowired[T] parameter was already rewritten into Depends(...) at
-    decoration time, on the router itself, regardless of wire() having run
-    yet for anything."""
+    include_router(). The router is built and its route decorated before
+    the app's container is configured at all -- that configuration only
+    happens on the FastAPI app itself, after the router already exists,
+    before include_router() mounts it. The global add_api_route patch is
+    what makes this safe: the route's bare Autowired[T] parameter was
+    already rewritten into Depends(...) at decoration time, on the router
+    itself, regardless of when the container is configured."""
     container = Container()
     container.register(RouterRepo)
     container.register(RouterService)
@@ -199,7 +199,7 @@ def test_wire_router_before_decoration_supports_include_router_pattern():
         return {"calls": service.call()}
 
     app = FastAPI()
-    wire(app, container=container)
+    app.state.pywire_container = container
     app.include_router(router)
 
     client = TestClient(app)
@@ -212,15 +212,16 @@ def test_wire_router_before_decoration_supports_include_router_pattern():
 def test_route_decorated_before_fastapi_app_exists_still_resolves():
     """A route decorated on a bare APIRouter before any FastAPI() instance
     exists anywhere (see router_defined_before_any_app at module scope,
-    above) still resolves correctly once an app is later created, wired,
-    and the router is included. This is the exact scenario that raised
-    FastAPIError at import time under the old route_class mechanism."""
+    above) still resolves correctly once an app is later created, its
+    container configured, and the router is included. This is the exact
+    scenario that raised FastAPIError at import time under the old
+    route_class mechanism."""
     container = Container()
     container.register(PreexistingRouterRepo)
     container.register(PreexistingRouterService)
 
     app = FastAPI()
-    wire(app, container=container)
+    app.state.pywire_container = container
     app.include_router(router_defined_before_any_app)
 
     client = TestClient(app)
@@ -236,8 +237,8 @@ class DefaultContainerRepo:
         self.value = "default-container-value"
 
 
-def test_autowired_resolves_via_default_container_when_wire_never_called():
-    """If wire() is never called for an app at all, Autowired[T] route
+def test_autowired_resolves_via_default_container_when_unconfigured():
+    """If an app's container is never configured at all, Autowired[T] route
     parameters still resolve -- against the module-level default container,
     the same one @component registers into."""
     app = FastAPI()
@@ -251,18 +252,6 @@ def test_autowired_resolves_via_default_container_when_wire_never_called():
     response = client.get("/default")
 
     assert response.json() == {"value": "default-container-value"}
-
-
-def test_wire_rejects_invalid_target():
-    """wire() only accepts a FastAPI instance; anything else -- including a
-    bare APIRouter, which is no longer a supported target now that routing
-    is patched globally -- raises TypeError instead of failing later with
-    an unhelpful AttributeError."""
-    with pytest.raises(TypeError, match="FastAPI instance"):
-        wire(object())  # type: ignore[arg-type]
-
-    with pytest.raises(TypeError, match="FastAPI instance"):
-        wire(APIRouter())  # type: ignore[arg-type]
 
 
 class AppConfig(BaseSettings):
@@ -300,7 +289,7 @@ def test_app_config_is_shared_across_services_and_repositories(monkeypatch):
     container.register(ConfigConsumingService)
 
     app = FastAPI()
-    wire(app, container=container)
+    app.state.pywire_container = container
 
     @app.get("/describe")
     def describe(
@@ -373,10 +362,10 @@ class TargetB:
         self.origin = "container-b"
 
 
-def test_two_apps_resolve_independently_via_their_own_wired_container():
+def test_two_apps_resolve_independently_via_their_own_container():
     """request.app.state.pywire_container means each app's routes resolve
     against that specific app's container -- two apps in the same process,
-    each wired with a different container, must not cross-contaminate."""
+    each configured with a different container, must not cross-contaminate."""
     container_a = Container()
     container_a.register(TargetA)
 
@@ -384,10 +373,10 @@ def test_two_apps_resolve_independently_via_their_own_wired_container():
     container_b.register(TargetB)
 
     app_a = FastAPI()
-    wire(app_a, container=container_a)
+    app_a.state.pywire_container = container_a
 
     app_b = FastAPI()
-    wire(app_b, container=container_b)
+    app_b.state.pywire_container = container_b
 
     @app_a.get("/origin")
     def get_origin_a(target: Autowired[TargetA]) -> dict:
@@ -434,7 +423,7 @@ def test_endpoint_can_inject_a_service_defined_below_it() -> None:
     container = Container()
     container.register(LateDefinedService)
 
-    wire(_late_app, container=container)
+    _late_app.state.pywire_container = container
 
     response = TestClient(_late_app).get("/late")
 
@@ -502,7 +491,7 @@ def test_a_protocol_bound_dependency_resolves_in_a_route():
     container.register(ItalianGreeter, as_type=Greeter)
 
     app = FastAPI()
-    wire(app, container=container)
+    app.state.pywire_container = container
 
     @app.get("/greet")
     def greet_route(greeter: Autowired[Greeter]) -> dict[str, str]:
@@ -544,8 +533,9 @@ def test_lifespan_rejects_an_app_and_close_on_shutdown_together():
 
 
 def test_two_different_containers_configured_for_one_app_is_rejected():
-    """wire(app, container=A) plus pywire_lifespan(container=B): one of the
-    two is dead configuration and its beans would never be closed."""
+    """Setting app.state.pywire_container directly plus
+    pywire_lifespan(container=B): one of the two is dead configuration and
+    its beans would never be closed."""
 
     class ConflictService:
         pass
@@ -556,7 +546,7 @@ def test_two_different_containers_configured_for_one_app_is_rejected():
     second.register(ConflictService)
 
     app = FastAPI(lifespan=pywire_lifespan(container=second))
-    wire(app, container=first)
+    app.state.pywire_container = first
 
     with pytest.raises(RuntimeError, match="already bound"):
         with TestClient(app):
@@ -564,8 +554,9 @@ def test_two_different_containers_configured_for_one_app_is_rejected():
 
 
 def test_the_same_container_configured_twice_is_accepted():
-    """Redundant, not contradictory: wire() and the lifespan naming the
-    same object is harmless and must not raise."""
+    """Redundant, not contradictory: setting app.state.pywire_container
+    directly and the lifespan naming the same object is harmless and must
+    not raise."""
 
     class RedundantService:
         def __init__(self) -> None:
@@ -575,7 +566,7 @@ def test_the_same_container_configured_twice_is_accepted():
     container.register(RedundantService)
 
     app = FastAPI(lifespan=pywire_lifespan(container=container))
-    wire(app, container=container)
+    app.state.pywire_container = container
 
     @app.get("/origin")
     def get_origin(service: Autowired[RedundantService]) -> dict:
