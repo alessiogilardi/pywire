@@ -17,3 +17,9 @@ wheels/
 
 # superpowers subagent-driven-development scratch workspace
 .superpowers/
+
+# Claude Code Windows launcher bug: HOME sometimes inherited as the literal,
+# unexpanded "%HOMEDRIVE%%HOMEPATH%", so a self-update writes its staging
+# files here instead of the real user home. Reported upstream; ignored here
+# as a stopgap until fixed.
+%HOMEDRIVE%%HOMEPATH%/
