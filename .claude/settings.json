@@ -1,0 +1,39 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PROJECT_DIR}/.claude/hooks/ruff_autofix.sh\"",
+            "if": "Edit(**/*.py)",
+            "timeout": 60,
+            "statusMessage": "Running ruff..."
+          },
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PROJECT_DIR}/.claude/hooks/pyright_check.sh\"",
+            "if": "Edit(**/*.py)",
+            "timeout": 60,
+            "statusMessage": "Running pyright..."
+          },
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PROJECT_DIR}/.claude/hooks/ruff_autofix.sh\"",
+            "if": "Write(**/*.py)",
+            "timeout": 60,
+            "statusMessage": "Running ruff..."
+          },
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PROJECT_DIR}/.claude/hooks/pyright_check.sh\"",
+            "if": "Write(**/*.py)",
+            "timeout": 60,
+            "statusMessage": "Running pyright..."
+          }
+        ]
+      }
+    ]
+  }
+}
