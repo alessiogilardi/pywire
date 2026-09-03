@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Any, cast, overload
 from fastapi import Depends, FastAPI, Request
 from fastapi.routing import APIRouter
 
-from .decorators import get_default_container
+from .container import get_default_container
 from .exceptions import AnnotationResolutionError
 from .markers import callable_hints, resolve_autowired_type
 
